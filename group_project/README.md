@@ -153,7 +153,7 @@ run_dashboard()
 
 ### Deliverable Evaluation
 
-- [ ] File `group_project/evaluation/golden_dataset.json` — 15+ cặp Q&A
+- [X] File `group_project/evaluation/golden_dataset.json` — 15+ cặp Q&A
 - [ ] File `group_project/evaluation/eval_pipeline.py` — script chạy evaluation
 - [ ] File `group_project/evaluation/results.md` — bảng điểm + phân tích
 - [ ] So sánh A/B ít nhất 2 configs
@@ -202,12 +202,12 @@ flowchart TD
 
 ## Phân Công Công Việc
 
-| Thành viên           | MSSV        | Nhiệm vụ                                                                                              | Trạng thái |
-| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------------- | ------------ |
-| Hoàng Văn Anh        | 2A202600762 | Craw data, convert to mark down, chunk index, RAG chatbot, Workflow system, Write mark down             |              |
-| Nguyễn Trường Giang | 2A202600792 |                                                                                                         |              |
-| Nguyễn Lý Minh Kỳ   | 2A202600782 | semantic search, reranking, retrieval pipeline, generation có citation ở backend, sample streamlit UI | Done         |
-| Phạm Ánh Dương     | 2A202600815 |                                                                                                         |              |
+| Thành viên           | MSSV        | Nhiệm vụ                                                                                                                                           | Trạng thái |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Hoàng Văn Anh        | 2A202600762 | Craw data, convert to mark down, chunk index, RAG chatbot, Workflow system, Write mark down                                                          | Done         |
+| Nguyễn Trường Giang | 2A202600792 | Chỉnh sửa evaluate.py để tích hợp các metric đánh giá + xây dựng golden_dataset.json làm bộ dữ liệu chuẩn phục vụ việc benchmark | Done         |
+| Nguyễn Lý Minh Kỳ   | 2A202600782 | semantic search, reranking, retrieval pipeline, generation có citation ở backend, sample streamlit UI                                              | Done         |
+| Phạm Ánh Dương     | 2A202600815 | Design and deploy, test chatbot                                                                                                                      |              |
 
 ---
 
