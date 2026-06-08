@@ -27,6 +27,23 @@ DEFAULT_TOP_K = 5
 RERANK_METHOD = "cross_encoder"  # "cross_encoder" | "mmr" | "rrf"
 
 
+def _safe_search(search_fn, query: str, top_k: int, label: str) -> list[dict]:
+    try:
+        return search_fn(query, top_k=top_k)
+    except Exception as exc:
+        print(f"! {label} search lỗi; bỏ qua nhánh này ({type(exc).__name__})")
+        return []
+
+
+def _mark_source(results: list[dict], source: str) -> list[dict]:
+    marked: list[dict] = []
+    for result in results:
+        item = result.copy()
+        item["source"] = source
+        marked.append(item)
+    return marked
+
+
 def retrieve(
     query: str,
     top_k: int = DEFAULT_TOP_K,
@@ -61,32 +78,43 @@ def retrieve(
             'source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement full retrieval pipeline
-    #
-    # Step 1: Song song chạy semantic + lexical
-    # dense_results = semantic_search(query, top_k=top_k * 2)
-    # sparse_results = lexical_search(query, top_k=top_k * 2)
-    #
-    # Step 2: Merge bằng RRF
-    # merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 2)
-    # for item in merged:
-    #     item["source"] = "hybrid"
-    #
-    # Step 3: Rerank
-    # if use_reranking and merged:
-    #     final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
-    # else:
-    #     final_results = merged[:top_k]
-    #
-    # Step 4: Check threshold → fallback
-    # if not final_results or final_results[0]["score"] < score_threshold:
-    #     print(f"  ⚠ Hybrid score ({final_results[0]['score']:.3f} if final_results else 0}) "
-    #           f"< threshold ({score_threshold}). Fallback → PageIndex")
-    #     fallback = pageindex_search(query, top_k=top_k)
-    #     return fallback
-    #
-    # return final_results[:top_k]
-    raise NotImplementedError("Implement retrieve")
+    if top_k <= 0 or not query.strip():
+        return []
+
+    # Lấy rộng hơn top_k để reranker có cơ hội kéo đúng điều luật lên trên.
+    expanded_top_k = max(top_k * 6, 20)
+
+    dense_results = _safe_search(semantic_search, query, expanded_top_k, "Semantic")
+    sparse_results = _safe_search(lexical_search, query, expanded_top_k, "Lexical")
+
+    if dense_results and sparse_results:
+        merged = rerank_rrf([dense_results, sparse_results], top_k=expanded_top_k)
+    else:
+        merged = sorted(
+            dense_results + sparse_results,
+            key=lambda item: float(item.get("score", 0.0)),
+            reverse=True,
+        )[:expanded_top_k]
+
+    merged = _mark_source(merged, "hybrid")
+
+    if use_reranking and merged:
+        final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
+        final_results = _mark_source(final_results, "hybrid")
+    else:
+        final_results = merged[:top_k]
+
+    best_score = float(final_results[0].get("score", 0.0)) if final_results else 0.0
+    if not final_results or best_score < score_threshold:
+        print(
+            f"  ! Hybrid score ({best_score:.3f}) < threshold "
+            f"({score_threshold}). Fallback -> PageIndex"
+        )
+        fallback = pageindex_search(query, top_k=top_k)
+        if fallback:
+            return fallback[:top_k]
+
+    return final_results[:top_k]
 
 
 if __name__ == "__main__":

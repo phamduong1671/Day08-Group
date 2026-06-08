@@ -10,6 +10,7 @@ Hướng dẫn:
 """
 
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,6 +33,16 @@ TOP_P = 0.9
 # temperature: Độ ngẫu nhiên của output
 # Chọn 0.3 vì: RAG cần factual, ít sáng tạo
 TEMPERATURE = 0.3
+
+OPENAI_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+TOKEN_PATTERN = re.compile(r"[\wÀ-ỹ]+", re.UNICODE)
+
+SOURCE_LABELS = {
+    "bo-luat-hinh-su-2017": "Bộ luật Hình sự 2015 sửa đổi 2017",
+    "luat-phong-chong-ma-tuy-2021": "Luật Phòng, chống ma túy 2021",
+    "nghi-dinh-105-2021": "Nghị định 105/2021/NĐ-CP",
+    "thong-tu-danh-muc-ma-tuy": "Thông tư danh mục chất ma túy",
+}
 
 
 # =============================================================================
@@ -75,20 +86,34 @@ def reorder_for_llm(chunks: list[dict]) -> list[dict]:
     Returns:
         List reordered để maximize LLM attention.
     """
-    # TODO: Implement reordering
-    #
-    # if len(chunks) <= 2:
-    #     return chunks
-    #
-    # # Split into first half (important → đầu) and second half (important → cuối)
-    # reordered = []
-    # for i in range(0, len(chunks), 2):
-    #     reordered.append(chunks[i])  # Odd positions go first
-    # for i in range(len(chunks) - 1 - (len(chunks) % 2 == 0), 0, -2):
-    #     reordered.append(chunks[i])  # Even positions go last (reversed)
-    #
-    # return reordered
-    raise NotImplementedError("Implement reorder_for_llm")
+    if len(chunks) <= 2:
+        return list(chunks)
+
+    front = list(chunks[::2])
+    back = list(chunks[1::2])
+    back.reverse()
+    return front + back
+
+
+def _source_stem(source: str) -> str:
+    return source.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+
+def citation_label(chunk: dict, fallback_index: int = 1) -> str:
+    """Tạo nhãn citation ngắn, ổn định cho source document."""
+    metadata = chunk.get("metadata", {}) or {}
+    source = metadata.get("source") or metadata.get("source_path") or f"Source {fallback_index}"
+    stem = _source_stem(str(source))
+
+    if stem in SOURCE_LABELS:
+        return SOURCE_LABELS[stem]
+
+    content = chunk.get("content", "")
+    title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
+    if title_match:
+        return title_match.group(1).strip()
+
+    return str(source)
 
 
 # =============================================================================
@@ -106,25 +131,117 @@ def format_context(chunks: list[dict]) -> str:
     Returns:
         Formatted context string.
     """
-    # TODO: Implement context formatting
-    #
-    # context_parts = []
-    # for i, chunk in enumerate(chunks, 1):
-    #     source = chunk.get("metadata", {}).get("source", f"Source {i}")
-    #     doc_type = chunk.get("metadata", {}).get("type", "unknown")
-    #     context_parts.append(
-    #         f"[Document {i} | Source: {source} | Type: {doc_type}]\n"
-    #         f"{chunk['content']}\n"
-    #     )
-    # return "\n---\n".join(context_parts)
-    raise NotImplementedError("Implement format_context")
+    context_parts = []
+    for i, chunk in enumerate(chunks, 1):
+        metadata = chunk.get("metadata", {}) or {}
+        source = metadata.get("source", f"Source {i}")
+        source_path = metadata.get("source_path", "")
+        doc_type = metadata.get("type", "unknown")
+        citation = citation_label(chunk, fallback_index=i)
+        score = float(chunk.get("score", 0.0))
+
+        context_parts.append(
+            f"[Document {i} | Citation: {citation} | Source: {source} | "
+            f"Type: {doc_type} | Score: {score:.3f}]\n"
+            f"Path: {source_path}\n"
+            f"{chunk.get('content', '')}\n"
+        )
+
+    return "\n---\n".join(context_parts)
+
+
+def _tokenize(text: str) -> set[str]:
+    return {token.lower() for token in TOKEN_PATTERN.findall(text) if len(token) >= 2}
+
+
+def _split_candidate_sentences(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    candidates: list[str] = []
+
+    for line in lines:
+        if line.startswith(("Source:", "Published:", "Crawled:", "Crawler:", "---")):
+            continue
+        if line.startswith("#"):
+            continue
+
+        parts = re.split(r"(?<=[.!?])\s+", line)
+        for part in parts:
+            part = part.strip(" -")
+            if len(part) >= 40:
+                candidates.append(part)
+
+    return candidates
+
+
+def _best_snippet(query: str, chunk: dict, max_chars: int = 360) -> str:
+    query_tokens = _tokenize(query)
+    candidates = _split_candidate_sentences(chunk.get("content", ""))
+    if not candidates:
+        text = re.sub(r"\s+", " ", chunk.get("content", "")).strip()
+        return text[:max_chars].rstrip()
+
+    def score(sentence: str) -> tuple[int, int]:
+        sentence_tokens = _tokenize(sentence)
+        return (len(query_tokens & sentence_tokens), min(len(sentence), max_chars))
+
+    best = max(candidates, key=score)
+    if len(best) <= max_chars:
+        return best
+    return best[:max_chars].rsplit(" ", 1)[0].rstrip() + "..."
+
+
+def _fallback_generate_answer(query: str, chunks: list[dict]) -> str:
+    if not chunks:
+        return "Tôi không thể xác minh thông tin này từ nguồn hiện có."
+
+    lines = []
+    used_labels: set[str] = set()
+    for index, chunk in enumerate(chunks, 1):
+        label = citation_label(chunk, fallback_index=index)
+        snippet = _best_snippet(query, chunk)
+        if not snippet or label in used_labels and len(lines) >= 2:
+            continue
+
+        lines.append(f"- {snippet} [{label}]")
+        used_labels.add(label)
+        if len(lines) >= 3:
+            break
+
+    if not lines:
+        return "Tôi không thể xác minh thông tin này từ nguồn hiện có."
+
+    return "Dựa trên các tài liệu tìm được:\n" + "\n".join(lines)
+
+
+def _has_openai_key() -> bool:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    placeholders = {"", "your-api-key", "your_api_key", "OPENAI_API_KEY", "api_key_cua_ban"}
+    return api_key not in placeholders
+
+
+def _format_conversation_history(conversation_history: list[dict] | None) -> str:
+    if not conversation_history:
+        return ""
+
+    formatted = []
+    for turn in conversation_history[-6:]:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if content:
+            formatted.append(f"{role}: {content}")
+    return "\n".join(formatted)
 
 
 # =============================================================================
 # GENERATION
 # =============================================================================
 
-def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
+def generate_with_citation(
+    query: str,
+    top_k: int = TOP_K,
+    conversation_history: list[dict] | None = None,
+    retrieval_query: str | None = None,
+) -> dict:
     """
     End-to-end RAG generation có citation.
 
@@ -146,43 +263,55 @@ def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
             'retrieval_source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement generation pipeline
-    #
-    # # Step 1: Retrieve
-    # chunks = retrieve(query, top_k=top_k)
-    #
-    # # Step 2: Reorder
-    # reordered = reorder_for_llm(chunks)
-    #
-    # # Step 3: Format context
-    # context = format_context(reordered)
-    #
-    # # Step 4: Build prompt
-    # user_message = f"""Context:\n{context}\n\n---\n\nQuestion: {query}"""
-    #
-    # # Step 5: Call LLM
-    # from openai import OpenAI
-    # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    #
-    # response = client.chat.completions.create(
-    #     model="gpt-4o-mini",
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": user_message}
-    #     ],
-    #     temperature=TEMPERATURE,
-    #     top_p=TOP_P,
-    # )
-    #
-    # answer = response.choices[0].message.content
-    #
-    # # Step 6: Return
-    # return {
-    #     "answer": answer,
-    #     "sources": chunks,
-    #     "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none"
-    # }
-    raise NotImplementedError("Implement generate_with_citation")
+    search_query = retrieval_query or query
+    chunks = retrieve(search_query, top_k=top_k)
+    reordered = reorder_for_llm(chunks)
+    context = format_context(reordered)
+    history = _format_conversation_history(conversation_history)
+
+    user_message = f"""Conversation history:
+{history if history else '(none)'}
+
+Context:
+{context}
+
+---
+
+Question: {query}"""
+
+    answer = ""
+    generation_backend = "local_context_extractive"
+
+    if _has_openai_key():
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+            )
+            answer = response.choices[0].message.content or ""
+            generation_backend = OPENAI_MODEL
+        except Exception as exc:
+            print(f"! Không gọi được OpenAI; dùng local generation fallback ({type(exc).__name__})")
+
+    if not answer.strip():
+        answer = _fallback_generate_answer(query, reordered)
+
+    return {
+        "answer": answer,
+        "sources": chunks,
+        "reordered_sources": reordered,
+        "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none",
+        "retrieval_query": search_query,
+        "generation_backend": generation_backend,
+    }
 
 
 if __name__ == "__main__":
