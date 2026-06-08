@@ -1,0 +1,6 @@
+.env
+.venv
+.claude
+.deepeval
+.pytest_cache
+

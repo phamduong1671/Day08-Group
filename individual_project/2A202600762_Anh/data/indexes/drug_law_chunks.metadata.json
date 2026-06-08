@@ -1,0 +1,9 @@
+{
+  "backend": "weaviate",
+  "collection": "DrugLawDocs",
+  "indexed_chunks": 717,
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dim": 1024,
+  "vector_store_requested": "weaviate",
+  "weaviate_target": "cloud"
+}

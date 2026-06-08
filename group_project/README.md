@@ -11,12 +11,14 @@ Sau khi hoàn thành bài cá nhân, nhóm ngồi lại để xây dựng **1 tr
 Xây dựng chatbot trả lời câu hỏi về pháp luật ma tuý và tin tức liên quan.
 
 **Yêu cầu:**
+
 - Giao diện chat (Streamlit / Gradio / Chainlit)
 - Trả lời có citation (dựa trên Task 10)
 - Hỗ trợ follow-up questions (conversation memory)
 - Hiển thị source documents đã dùng
 
 **Stack gợi ý:**
+
 ```
 Chainlit/Streamlit → Retrieval (Task 9) → Generation (Task 10) → Display
 ```
@@ -29,11 +31,11 @@ Sử dụng **1 trong 3 framework** sau để evaluate pipeline RAG của nhóm:
 
 ### Framework lựa chọn
 
-| Framework | Cài đặt | Đặc điểm |
-|-----------|---------|-----------|
+| Framework                                         | Cài đặt               | Đặc điểm                                      |
+| ------------------------------------------------- | ------------------------ | ------------------------------------------------- |
 | [DeepEval](https://github.com/confident-ai/deepeval) | `pip install deepeval` | Nhiều metric built-in, dễ integrate với pytest |
-| [RAGAS](https://github.com/explodinggradients/ragas) | `pip install ragas` | Chuẩn industry cho RAG eval, 3 trục chính |
-| [TruLens](https://github.com/truera/trulens) | `pip install trulens` | Dashboard UI, feedback functions mạnh |
+| [RAGAS](https://github.com/explodinggradients/ragas) | `pip install ragas`    | Chuẩn industry cho RAG eval, 3 trục chính      |
+| [TruLens](https://github.com/truera/trulens)         | `pip install trulens`  | Dashboard UI, feedback functions mạnh            |
 
 ### Yêu cầu Evaluation
 
@@ -151,7 +153,7 @@ run_dashboard()
 
 ### Deliverable Evaluation
 
-- [ ] File `group_project/evaluation/golden_dataset.json` — 15+ cặp Q&A
+- [X] File `group_project/evaluation/golden_dataset.json` — 15+ cặp Q&A
 - [ ] File `group_project/evaluation/eval_pipeline.py` — script chạy evaluation
 - [ ] File `group_project/evaluation/results.md` — bảng điểm + phân tích
 - [ ] So sánh A/B ít nhất 2 configs
@@ -170,20 +172,42 @@ run_dashboard()
 
 ## Kiến Trúc Hệ Thống
 
+```mermaid
+flowchart TD
+    A[User hỏi trên UI chat<br/>Streamlit / Gradio / Chainlit] --> B[Group Chatbot Backend<br/>group_project/rag_chatbot_backend.py]
+    B --> C[Conversation Memory<br/>session_id + recent turns]
+    C --> D[Contextual Query Builder<br/>ghép câu hỏi follow-up với lịch sử gần nhất]
+    D --> E[Retrieval Pipeline - Task 9]
+
+    E --> F[Semantic Search - Task 5<br/>dense retrieval]
+    E --> G[Lexical Search - Task 6<br/>BM25 keyword search]
+    F --> H[Merge bằng RRF]
+    G --> H
+    H --> I[Reranking - Task 7]
+    I --> J{Score đủ tốt?}
+    J -- Không --> K[PageIndex / Vectorless Fallback - Task 8]
+    J -- Có --> L[Top source chunks]
+    K --> L
+
+    L --> M[Generation Có Citation - Task 10<br/>reorder context + prompt]
+    M --> N[Answer có citation]
+    M --> O[Source documents đã dùng<br/>citation, score, path, preview]
+    N --> P[UI hiển thị câu trả lời]
+    O --> P
 ```
-[Vẽ diagram kiến trúc ở đây]
-```
+
+**Luồng chính:** UI chỉ cần gọi backend bằng `session_id`. Backend tự lưu hội thoại gần nhất, biến câu hỏi follow-up thành contextual query, gọi Task 9 để lấy source chunks, gọi Task 10 để sinh câu trả lời có citation, rồi trả về cả `answer` và `source_documents` cho UI hiển thị.
 
 ---
 
 ## Phân Công Công Việc
 
-| Thành viên | MSSV | Nhiệm vụ | Trạng thái |
-|-----------|------|----------|------------|
-| | | | |
-| | | | |
-| | | | |
-| | | | |
+| Thành viên           | MSSV        | Nhiệm vụ                                                                                                                                           | Trạng thái |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Hoàng Văn Anh        | 2A202600762 | Craw data, convert to mark down, chunk index, RAG chatbot, Workflow system, Write mark down                                                          | Done         |
+| Nguyễn Trường Giang | 2A202600792 | Chỉnh sửa evaluate.py để tích hợp các metric đánh giá + xây dựng golden_dataset.json làm bộ dữ liệu chuẩn phục vụ việc benchmark | Done         |
+| Nguyễn Lý Minh Kỳ   | 2A202600782 | semantic search, reranking, retrieval pipeline, generation có citation ở backend, sample streamlit UI                                              | Done         |
+| Phạm Ánh Dương     | 2A202600815 | Design and deploy, test chatbot                                                                                                                      |              |
 
 ---
 
@@ -193,11 +217,30 @@ run_dashboard()
 # Cài đặt dependencies
 pip install -r requirements.txt
 
-# Chạy app
-streamlit run app.py
-# hoặc
-chainlit run app.py
+# Test nhanh backend chatbot không cần UI
+python -m group_project.rag_chatbot_backend
 ```
+
+UI team có thể tích hợp backend như sau:
+
+```python
+from group_project.rag_chatbot_backend import chat, reset_session
+
+result = chat(
+    "Tàng trữ trái phép chất ma túy bị xử lý như thế nào?",
+    session_id="demo-user",
+)
+
+print(result["answer"])
+print(result["source_documents"])
+```
+
+Output backend trả về các trường chính:
+
+- `answer`: câu trả lời có citation.
+- `source_documents`: danh sách source chunks đã dùng, gồm `citation`, `source_path`, `score`, `preview`.
+- `citations`: danh sách citation xuất hiện trong câu trả lời.
+- `history`: lịch sử hội thoại theo `session_id`, dùng cho follow-up questions.
 
 ---
 

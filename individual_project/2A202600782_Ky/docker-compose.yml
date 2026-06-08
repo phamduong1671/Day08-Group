@@ -1,0 +1,22 @@
+# Weaviate cho Task 4 — vector store (vectorizer=none, ta tự cấp vector từ bge-m3).
+# Khởi động:  docker compose up -d
+# Kiểm tra:   curl http://localhost:8080/v1/.well-known/ready
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.27.0
+    container_name: weaviate-rag
+    ports:
+      - "8080:8080"   # REST/GraphQL
+      - "50051:50051" # gRPC (client v4)
+    restart: unless-stopped
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      QUERY_DEFAULTS_LIMIT: "25"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+
+volumes:
+  weaviate_data:
