@@ -10,6 +10,8 @@ const threshold = document.querySelector("#threshold");
 const thresholdValue = document.querySelector("#thresholdValue");
 const charCount = document.querySelector("#charCount");
 const clearChat = document.querySelector("#clearChat");
+const STORAGE_KEY = "rag-chat-messages-v2";
+const SESSION_ID = "html-ui";
 
 const demoSources = [
   {
@@ -66,15 +68,15 @@ let latestSources = getLatestSources(messages);
 
 function loadMessages() {
   try {
-    const saved = JSON.parse(localStorage.getItem("rag-chat-messages") || "[]");
-    return saved.length ? saved : initialMessages;
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    return saved.length ? saved : structuredClone(initialMessages);
   } catch {
-    return initialMessages;
+    return structuredClone(initialMessages);
   }
 }
 
 function saveMessages() {
-  localStorage.setItem("rag-chat-messages", JSON.stringify(messages));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
 }
 
 function getLatestSources(items) {
@@ -83,12 +85,23 @@ function getLatestSources(items) {
 }
 
 function escapeHtml(value) {
-  return String(value)
+  return fixText(value)
+    .normalize("NFC")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function fixText(value) {
+  const text = String(value ?? "");
+  if (!/[ÃÄÂáºá»Æ]/.test(text)) return text.normalize("NFC");
+  try {
+    return decodeURIComponent(escape(text)).normalize("NFC");
+  } catch {
+    return text.normalize("NFC");
+  }
 }
 
 function renderCitations(text) {
@@ -114,16 +127,17 @@ function renderMessage(message) {
 
 function shortDescription(source) {
   const metadata = source.metadata || {};
-  const content = String(source.content || "");
-  if (metadata.type === "news") return content.slice(0, 86) || "Bài viết tin tức liên quan";
+  const content = fixText(source.preview || source.content || "");
+  const type = source.type || metadata.type;
+  if (type === "news") return content.slice(0, 86) || "Bài viết tin tức liên quan";
   return content.slice(0, 86) || "Quốc hội nước Cộng hòa xã hội chủ nghĩa Việt Nam";
 }
 
 function articleLabel(source) {
-  const path = source.metadata?.source_path || "";
+  const path = source.source_path || source.metadata?.source_path || "";
   const match = path.match(/dieu[-_\s]*(\d+)/i);
   if (match) return `Điều ${match[1]}`;
-  const title = source.metadata?.source || "";
+  const title = fixText(source.source || source.citation || source.metadata?.source || "");
   if (title.includes("Hình sự")) return "Điều 249";
   if (title.includes("Nghị định")) return "Điều 2";
   return "Điều 3";
@@ -134,7 +148,7 @@ function renderSources(items) {
   sources.innerHTML = cards
     .map((source) => {
       const metadata = source.metadata || {};
-      const title = metadata.source || metadata.title || "Source document";
+      const title = fixText(source.citation || source.source || metadata.source || metadata.title || "Source document");
       const score = Number(source.score || 0).toFixed(3);
       return `
         <article class="source-card">
@@ -183,8 +197,9 @@ async function ask(question) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         question,
-        history: messages.slice(-8),
+        session_id: SESSION_ID,
         top_k: Number(topK.value),
+        exact_phrase: true,
       }),
     });
     const result = await response.json();
@@ -242,10 +257,17 @@ threshold.addEventListener("input", () => {
 });
 
 clearChat.addEventListener("click", () => {
-  messages = initialMessages;
-  latestSources = demoSources;
+  localStorage.removeItem("rag-chat-messages");
+  localStorage.removeItem(STORAGE_KEY);
+  messages = structuredClone(initialMessages);
+  latestSources = structuredClone(demoSources);
   saveMessages();
   renderAll();
+  fetch("/api/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION_ID }),
+  }).catch(() => {});
 });
 
 renderAll();

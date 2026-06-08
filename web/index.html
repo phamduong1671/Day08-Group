@@ -11,47 +11,11 @@
       <h2>Thiết lập</h2>
 
       <section class="panel-group">
-        <label for="modelSelect">Mô hình</label>
-        <select id="modelSelect">
-          <option>Hybrid RAG (Semantic + BM25)</option>
-        </select>
-      </section>
-
-      <section class="panel-group">
         <h3>Chế độ trả lời</h3>
         <label class="radio-row">
-          <input type="radio" name="answerMode" value="short" />
-          <span>Trả lời ngắn gọn</span>
+          <input type="radio" name="answerMode" value="exact" checked />
+          <span>Tìm chính xác cụm từ</span>
         </label>
-        <label class="radio-row">
-          <input type="radio" name="answerMode" value="detail" checked />
-          <span>Trả lời chi tiết</span>
-        </label>
-        <label class="radio-row">
-          <input type="radio" name="answerMode" value="legal" />
-          <span>Trả lời kèm căn cứ pháp luật</span>
-        </label>
-      </section>
-
-      <section class="panel-group divided">
-        <h3>Nguồn dữ liệu</h3>
-        <label class="check-row">
-          <input type="checkbox" checked />
-          <span>Hybrid: Semantic search</span>
-        </label>
-        <label class="check-row">
-          <input type="checkbox" checked />
-          <span>Hybrid: BM25 lexical search</span>
-        </label>
-        <label class="check-row">
-          <input type="checkbox" checked />
-          <span>Hybrid: Rerank + PageIndex fallback</span>
-        </label>
-        <button class="link-row" type="button">
-          <span class="icon">⚙</span>
-          <span>Quản lý nguồn</span>
-          <span class="chevron">›</span>
-        </button>
       </section>
 
       <section class="panel-group divided">
@@ -89,8 +53,8 @@
 
       <section class="feedback" aria-label="Đánh giá câu trả lời">
         <span>Hữu ích?</span>
-        <button type="button" aria-label="Thích">♡</button>
-        <button type="button" aria-label="Không thích">♧</button>
+        <button type="button" aria-label="Thích">Like</button>
+        <button type="button" aria-label="Không thích">Dislike</button>
       </section>
 
       <section class="sources-section">
@@ -110,7 +74,7 @@
           placeholder="Nhập câu hỏi của bạn..."
         />
         <span id="charCount">0/2000</span>
-        <button id="sendButton" type="submit" aria-label="Gửi câu hỏi">➤</button>
+        <button id="sendButton" type="submit" aria-label="Gửi câu hỏi">Gửi</button>
       </form>
     </main>
 
