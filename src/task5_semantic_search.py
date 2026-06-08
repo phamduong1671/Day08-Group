@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any
+from functools import lru_cache
 
 from .config import COLLECTION_NAME
 from .task4_chunking_indexing import (
@@ -154,6 +155,52 @@ def _embed_query(query: str) -> list[float]:
     return _hash_embedding(query, dim=EMBEDDING_DIM)
 
 
+@lru_cache(maxsize=128)
+def generate_hypothetical_document(query: str) -> str:
+    """
+    HyDE: sinh một đoạn văn có thể trả lời query rồi embed đoạn đó.
+
+    Đoạn giả định không được trả cho người dùng và không được xem là evidence;
+    nó chỉ giúp query ngắn gần hơn với văn phong dài, trang trọng của corpus luật.
+    Nếu LLM local không sẵn sàng, trả chuỗi rỗng để semantic search dùng query gốc.
+    """
+    if os.getenv("HYDE_ENABLED", "1") != "1":
+        return ""
+
+    try:
+        from openai import OpenAI
+        from .config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+
+        client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=4.0, max_retries=0)
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Viết một đoạn văn pháp lý tiếng Việt khoảng 100-150 từ có khả năng "
+                        "trả lời truy vấn. Không bịa số điều, nguồn hoặc sự kiện cụ thể."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            temperature=0.2,
+            top_p=0.9,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+def _embed_query_with_hyde(query: str) -> list[float]:
+    """
+    Embed HyDE bằng chính encoder của Task 4/Task 5, bảo đảm query, hypothetical
+    document và corpus đều nằm trong cùng không gian vector.
+    """
+    hypothetical = generate_hypothetical_document(query)
+    return _embed_query(hypothetical or query)
+
+
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right:
         return 0.0
@@ -245,7 +292,7 @@ def semantic_search(query: str, top_k: int = 10) -> list[dict]:
     if top_k <= 0 or not query.strip():
         return []
 
-    query_embedding = _embed_query(query.strip())
+    query_embedding = _embed_query_with_hyde(query.strip())
 
     try:
         results = _search_weaviate(query_embedding, top_k)

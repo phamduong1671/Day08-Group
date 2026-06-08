@@ -8,8 +8,10 @@ BM25 hoạt động thế nào:
     - score(q,d) = Σ IDF(qi) * (tf(qi,d)*(k1+1)) / (tf(qi,d) + k1*(1-b+b*|d|/avgdl))
     - k1=1.5 (term saturation), b=0.75 (length normalization).
 
-ĐIỂM MẤU CHỐT TIẾNG VIỆT: `str.split()` tách sai từ ghép ("tàng trữ", "ma tuý").
-→ Dùng pyvi.ViTokenizer để word-segment, cùng tokenizer cho cả corpus lẫn query.
+ĐIỂM MẤU CHỐT TIẾNG VIỆT: đây vẫn là BM25Okapi, nhưng không phải baseline BM25
+dùng `str.split()`. PyVi biến từ ghép như "tàng trữ" thành một lexical unit
+(`tàng_trữ`), giảm match rời sai nghĩa. Cùng một tokenizer được dùng cho corpus
+và query nên term frequency/IDF được tính trên đơn vị từ tiếng Việt nhất quán.
 
 Corpus = chính tập chunk của Task 4 (chunk_documents(load_documents())) → nội dung
 trùng khớp với những gì đã index vào Weaviate, để RRF ở Task 9 merge hợp lệ.

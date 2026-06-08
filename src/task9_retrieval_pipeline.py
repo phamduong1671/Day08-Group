@@ -27,6 +27,20 @@ DEFAULT_TOP_K = 5
 RERANK_METHOD = "cross_encoder"
 
 
+def _normalize_result(item: dict, retrieval_source: str) -> dict:
+    metadata = dict(item.get("metadata") or {})
+    metadata.setdefault("source", metadata.get("title", ""))
+    metadata.setdefault("source_path", "")
+    metadata.setdefault("type", "unknown")
+    return {
+        **item,
+        "content": str(item.get("content", "")),
+        "score": float(item.get("score", 0.0)),
+        "metadata": metadata,
+        "source": retrieval_source,
+    }
+
+
 def retrieve(
     query: str,
     top_k: int = DEFAULT_TOP_K,
@@ -52,8 +66,7 @@ def retrieve(
     else:
         final_results = merged[:top_k]
 
-    for item in final_results:
-        item["source"] = "hybrid"
+    final_results = [_normalize_result(item, "hybrid") for item in final_results]
 
     # Step 4: fallback PageIndex nếu hybrid rỗng hoặc điểm tốt nhất dưới ngưỡng.
     best_score = final_results[0]["score"] if final_results else 0.0
@@ -64,7 +77,7 @@ def retrieve(
         )
         fallback = pageindex_search(query, top_k=top_k)
         if fallback:  # chỉ thay khi PageIndex thực sự có kết quả
-            return fallback[:top_k]
+            return [_normalize_result(item, "pageindex") for item in fallback[:top_k]]
 
     return final_results[:top_k]
 

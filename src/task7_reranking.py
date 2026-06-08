@@ -2,8 +2,10 @@
 Task 7 — Reranking Module.
 
 Cung cấp 3 chiến lược (đều dùng được, mỗi cái một vai trò):
-    - cross_encoder: BAAI/bge-reranker-v2-m3 — chấm lại relevance (query, doc) sâu hơn
-      bi-encoder. Mặc định cho rerank() vì chất lượng cao nhất cho tiếng Việt.
+    - cross_encoder: BAAI/bge-reranker-v2-m3 — chọn vì model multilingual hỗ trợ
+      tiếng Việt, xử lý trực tiếp cặp (query, document) nên bắt được quan hệ pháp
+      lý sâu hơn cosine bi-encoder, và cùng họ BGE với embedding Task 4/5 giúp
+      stack nhất quán. Model chạy local, không phụ thuộc API/rò rỉ dữ liệu luật.
     - mmr: Maximal Marginal Relevance — giảm trùng lặp, tăng đa dạng.
     - rrf: Reciprocal Rank Fusion — gộp nhiều ranked list (dùng ở Task 9 merge dense+sparse).
 """
