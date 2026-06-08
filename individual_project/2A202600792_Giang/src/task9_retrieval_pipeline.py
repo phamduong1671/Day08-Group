@@ -61,32 +61,59 @@ def retrieve(
             'source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement full retrieval pipeline
-    #
-    # Step 1: Song song chạy semantic + lexical
-    # dense_results = semantic_search(query, top_k=top_k * 2)
-    # sparse_results = lexical_search(query, top_k=top_k * 2)
-    #
-    # Step 2: Merge bằng RRF
-    # merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 2)
-    # for item in merged:
-    #     item["source"] = "hybrid"
-    #
-    # Step 3: Rerank
-    # if use_reranking and merged:
-    #     final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
-    # else:
-    #     final_results = merged[:top_k]
-    #
-    # Step 4: Check threshold → fallback
-    # if not final_results or final_results[0]["score"] < score_threshold:
-    #     print(f"  ⚠ Hybrid score ({final_results[0]['score']:.3f} if final_results else 0}) "
-    #           f"< threshold ({score_threshold}). Fallback → PageIndex")
-    #     fallback = pageindex_search(query, top_k=top_k)
-    #     return fallback
-    #
-    # return final_results[:top_k]
-    raise NotImplementedError("Implement retrieve")
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Step 1: Run semantic + lexical in parallel.
+    # Both are I/O-bound (Weaviate socket / disk reads), so threading helps.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        dense_future = executor.submit(semantic_search, query, top_k * 2)
+        sparse_future = executor.submit(lexical_search, query, top_k * 2)
+        try:
+            dense_results = dense_future.result()
+        except Exception:
+            dense_results = []
+        try:
+            sparse_results = sparse_future.result()
+        except Exception:
+            sparse_results = []
+
+    # Step 2: Merge with Reciprocal Rank Fusion.
+    # RRF is chosen because it is model-free and handles score-scale
+    # incompatibility between cosine similarity and BM25 naturally.
+    candidate_lists = [lst for lst in (dense_results, sparse_results) if lst]
+    if candidate_lists:
+        merged = rerank_rrf(candidate_lists, top_k=top_k * 2)
+    else:
+        merged = []
+    for item in merged:
+        item["source"] = "hybrid"
+
+    # Step 3: Rerank with cross-encoder; fall back to RRF order on API error.
+    if use_reranking and merged:
+        try:
+            final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
+            for item in final_results:
+                item.setdefault("source", "hybrid")
+        except Exception:
+            final_results = merged[:top_k]
+    else:
+        final_results = merged[:top_k]
+
+    # Step 4: Fallback to PageIndex when the best hybrid score is too low.
+    best_score = final_results[0]["score"] if final_results else 0.0
+    if best_score < score_threshold:
+        print(
+            f"  ⚠ Hybrid best score {best_score:.3f} < threshold {score_threshold}. "
+            "Falling back to PageIndex."
+        )
+        try:
+            fallback = pageindex_search(query, top_k=top_k)
+            if fallback:
+                return fallback
+        except Exception:
+            pass
+
+    return final_results[:top_k]
 
 
 if __name__ == "__main__":
