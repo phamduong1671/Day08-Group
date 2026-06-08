@@ -17,8 +17,50 @@ BM25 hoạt động thế nào:
 
 from pathlib import Path
 
-# TODO: Load corpus từ data/standardized/ hoặc từ vector store
+_STANDARDIZED_DIR = Path(__file__).parent.parent / "data" / "standardized"
+
+# Chunk size mirrors Task 4 so both retrievers work on identical granularity.
+_CHUNK_SIZE = 500
+_CHUNK_OVERLAP = 50
+
 CORPUS: list[dict] = []  # List of {'content': str, 'metadata': dict}
+
+# Module-level caches so repeated calls don't rebuild the index.
+_bm25 = None
+
+
+def _load_corpus() -> list[dict]:
+    """Load and chunk all markdown files from data/standardized/."""
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=_CHUNK_SIZE,
+        chunk_overlap=_CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+
+    chunks = []
+    for md_file in sorted(_STANDARDIZED_DIR.rglob("*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        doc_type = md_file.parent.name
+        for i, chunk_text in enumerate(splitter.split_text(content)):
+            chunks.append({
+                "content": chunk_text,
+                "metadata": {
+                    "source": md_file.name,
+                    "type": doc_type,
+                    "chunk_index": i,
+                },
+            })
+    return chunks
+
+
+def _get_corpus_and_bm25():
+    global CORPUS, _bm25
+    if _bm25 is None:
+        CORPUS = _load_corpus()
+        _bm25 = build_bm25_index(CORPUS)
+    return CORPUS, _bm25
 
 
 def build_bm25_index(corpus: list[dict]):
@@ -28,15 +70,13 @@ def build_bm25_index(corpus: list[dict]):
     Args:
         corpus: List of {'content': str, 'metadata': dict}
     """
-    # TODO: Implement BM25 index
-    #
-    # from rank_bm25 import BM25Okapi
-    #
-    # # Tokenize - cho tiếng Việt nên dùng underthesea hoặc đơn giản split()
-    # tokenized_corpus = [doc["content"].lower().split() for doc in corpus]
-    # bm25 = BM25Okapi(tokenized_corpus)
-    # return bm25
-    raise NotImplementedError("Implement build_bm25_index")
+    from rank_bm25 import BM25Okapi
+
+    # Split by whitespace — sufficient for Vietnamese because word boundaries
+    # are space-delimited; underthesea would improve recall for compound words
+    # but adds a heavy dependency not required by the task spec.
+    tokenized_corpus = [doc["content"].lower().split() for doc in corpus]
+    return BM25Okapi(tokenized_corpus)
 
 
 def lexical_search(query: str, top_k: int = 10) -> list[dict]:
@@ -55,25 +95,24 @@ def lexical_search(query: str, top_k: int = 10) -> list[dict]:
         }
         Sorted by score descending.
     """
-    # TODO: Implement lexical search
-    #
-    # tokenized_query = query.lower().split()
-    # scores = bm25.get_scores(tokenized_query)
-    #
-    # # Get top_k indices
-    # import numpy as np
-    # top_indices = np.argsort(scores)[::-1][:top_k]
-    #
-    # results = []
-    # for idx in top_indices:
-    #     if scores[idx] > 0:
-    #         results.append({
-    #             "content": CORPUS[idx]["content"],
-    #             "score": float(scores[idx]),
-    #             "metadata": CORPUS[idx]["metadata"]
-    #         })
-    # return results
-    raise NotImplementedError("Implement lexical_search")
+    import numpy as np
+
+    corpus, bm25 = _get_corpus_and_bm25()
+
+    tokenized_query = query.lower().split()
+    scores = bm25.get_scores(tokenized_query)
+
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+    for idx in top_indices:
+        if scores[idx] > 0:
+            results.append({
+                "content": corpus[idx]["content"],
+                "score": float(scores[idx]),
+                "metadata": corpus[idx]["metadata"],
+            })
+    return results
 
 
 if __name__ == "__main__":

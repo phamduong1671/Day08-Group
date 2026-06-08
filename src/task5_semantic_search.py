@@ -141,8 +141,8 @@ def _embed_query(query: str) -> list[float]:
     nghĩa. Vì vậy mặc định dùng bge-m3 khi index là bge-m3 thật; chỉ dùng
     hash/pseudo khi index cũng là hash-fallback. Env USE_BGE_QUERY_MODEL=0/1 để ép.
     """
-    env = os.getenv("USE_BGE_QUERY_MODEL")
-    use_model = (env == "1") if env is not None else (not _index_uses_hash_embedding())
+    env = os.getenv("USE_BGE_QUERY_MODEL", "0")
+    use_model = env == "1"
     if use_model:
         try:
             model = _load_query_model()
@@ -167,7 +167,7 @@ def generate_hypothetical_document(query: str) -> str:
     nó chỉ giúp query ngắn gần hơn với văn phong dài, trang trọng của corpus luật.
     Nếu LLM local không sẵn sàng, trả chuỗi rỗng để semantic search dùng query gốc.
     """
-    if os.getenv("HYDE_ENABLED", "1") != "1":
+    if os.getenv("HYDE_ENABLED", "0") != "1":
         return ""
 
     try:

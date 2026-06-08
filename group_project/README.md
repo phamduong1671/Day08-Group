@@ -27,44 +27,77 @@ group_project/evaluation/golden_dataset.json
 
 ---
 
-## Option 1 — RAG Chatbot
+**Yêu cầu:**
 
-- [x] Giao diện Streamlit
-- [x] Chat UI bằng `st.chat_message` và `st.chat_input`
-- [x] Trả lời bằng full RAG pipeline `src.task10_generation.generate_with_citation`
-- [x] Citation trong câu trả lời theo prompt Task 10
-- [x] Conversation memory cho follow-up questions
-- [x] Hiển thị source documents đã dùng cho từng câu trả lời
-- [x] Lưu source documents trong `st.session_state` để rerun vẫn thấy nguồn cũ
-- [x] Cho phép bật/tắt cross-encoder reranking trong UI
-- [x] Cho phép chỉnh số source chunks `top_k`
+- Giao diện chat (Streamlit / Gradio / Chainlit)
+- Trả lời có citation (dựa trên Task 10)
+- Hỗ trợ follow-up questions (conversation memory)
+- Hiển thị source documents đã dùng
 
-Entrypoint:
+**Stack gợi ý:**
 
-```bash
-streamlit run app.py
+```
+Chainlit/Streamlit → Retrieval (Task 9) → Generation (Task 10) → Display
 ```
 
 ---
 
-## Option 2 — RAG Evaluation Pipeline
+## Yêu cầu 2: RAG Evaluation Pipeline
 
-- [x] Framework: DeepEval
-- [x] Golden dataset file: `group_project/evaluation/golden_dataset.json`
-- [x] Dataset hiện tại: 48 câu Q&A
-- [x] Smoke test mặc định: 2 câu đầu trong dataset
-- [x] Metrics: Faithfulness, Answer Relevancy, Contextual Recall, Contextual Precision
-- [x] A/B comparison: hybrid + rerank vs hybrid no-rerank
-- [x] Report file: `group_project/evaluation/results.md`
-- [x] A/B no-rerank không bị PageIndex fallback làm lệch kết quả RRF
-- [x] Evaluation load `.env` trước khi tạo DeepEval judge/model client
-- [x] Sample 2 Q&A đã chạy và ghi report
-- [ ] Full evaluation: chạy sau khi golden dataset mới/chốt đáp án được cập nhật
+Sử dụng **1 trong 3 framework** sau để evaluate pipeline RAG của nhóm:
 
-Chạy smoke test mặc định 2 câu:
+### Framework lựa chọn
 
-```bash
-python -m group_project.evaluation.eval_pipeline
+| Framework                                         | Cài đặt               | Đặc điểm                                      |
+| ------------------------------------------------- | ------------------------ | ------------------------------------------------- |
+| [DeepEval](https://github.com/confident-ai/deepeval) | `pip install deepeval` | Nhiều metric built-in, dễ integrate với pytest |
+| [RAGAS](https://github.com/explodinggradients/ragas) | `pip install ragas`    | Chuẩn industry cho RAG eval, 3 trục chính      |
+| [TruLens](https://github.com/truera/trulens)         | `pip install trulens`  | Dashboard UI, feedback functions mạnh            |
+
+### Yêu cầu Evaluation
+
+1. **Tạo Golden Dataset** — tối thiểu 15 cặp Q&A (question, expected_answer, expected_context)
+2. **Chạy evaluation** trên toàn bộ golden dataset với các metrics sau:
+   - **Faithfulness** — câu trả lời có bám đúng context không?
+   - **Answer Relevance** — câu trả lời có đúng câu hỏi không?
+   - **Context Recall** — retriever có lấy đủ evidence không?
+   - **Context Precision** — trong context lấy về, bao nhiêu % thực sự hữu ích?
+3. **So sánh A/B** — chạy eval trên ít nhất 2 config khác nhau (ví dụ: có reranking vs không reranking, hoặc hybrid vs dense-only)
+4. **Báo cáo** — bảng điểm + phân tích worst performers + đề xuất cải tiến
+
+### Code mẫu — DeepEval
+
+```python
+from deepeval import evaluate
+from deepeval.metrics import (
+    FaithfulnessMetric,
+    AnswerRelevancyMetric,
+    ContextualRecallMetric,
+    ContextualPrecisionMetric,
+)
+from deepeval.test_case import LLMTestCase
+
+# Tạo test cases từ golden dataset
+test_cases = []
+for item in golden_dataset:
+    result = rag_pipeline.generate_with_citation(item["question"])
+    test_case = LLMTestCase(
+        input=item["question"],
+        actual_output=result["answer"],
+        expected_output=item["expected_answer"],
+        retrieval_context=[c["content"] for c in result["sources"]],
+    )
+    test_cases.append(test_case)
+
+# Chạy evaluation
+metrics = [
+    FaithfulnessMetric(threshold=0.7),
+    AnswerRelevancyMetric(threshold=0.7),
+    ContextualRecallMetric(threshold=0.7),
+    ContextualPrecisionMetric(threshold=0.7),
+]
+
+results = evaluate(test_cases, metrics)
 ```
 
 Chạy N câu:
@@ -108,7 +141,10 @@ pip install -r requirements.txt
 
 ### 2. Cấu hình môi trường
 
-Tạo `.env` từ `.env.example`, tối thiểu cần:
+- [X] File `group_project/evaluation/golden_dataset.json` — 15+ cặp Q&A
+- [ ] File `group_project/evaluation/eval_pipeline.py` — script chạy evaluation
+- [ ] File `group_project/evaluation/results.md` — bảng điểm + phân tích
+- [ ] So sánh A/B ít nhất 2 configs
 
 ```bash
 OPENAI_API_KEY=...
@@ -130,9 +166,31 @@ LLM_MODEL=qwen2.5:7b-instruct
 
 ### 3. Build/rebuild index khi data thay đổi
 
-```bash
-python -m src.task4_chunking_indexing
+```mermaid
+flowchart TD
+    A[User hỏi trên UI chat<br/>Streamlit / Gradio / Chainlit] --> B[Group Chatbot Backend<br/>group_project/rag_chatbot_backend.py]
+    B --> C[Conversation Memory<br/>session_id + recent turns]
+    C --> D[Contextual Query Builder<br/>ghép câu hỏi follow-up với lịch sử gần nhất]
+    D --> E[Retrieval Pipeline - Task 9]
+
+    E --> F[Semantic Search - Task 5<br/>dense retrieval]
+    E --> G[Lexical Search - Task 6<br/>BM25 keyword search]
+    F --> H[Merge bằng RRF]
+    G --> H
+    H --> I[Reranking - Task 7]
+    I --> J{Score đủ tốt?}
+    J -- Không --> K[PageIndex / Vectorless Fallback - Task 8]
+    J -- Có --> L[Top source chunks]
+    K --> L
+
+    L --> M[Generation Có Citation - Task 10<br/>reorder context + prompt]
+    M --> N[Answer có citation]
+    M --> O[Source documents đã dùng<br/>citation, score, path, preview]
+    N --> P[UI hiển thị câu trả lời]
+    O --> P
 ```
+
+**Luồng chính:** UI chỉ cần gọi backend bằng `session_id`. Backend tự lưu hội thoại gần nhất, biến câu hỏi follow-up thành contextual query, gọi Task 9 để lấy source chunks, gọi Task 10 để sinh câu trả lời có citation, rồi trả về cả `answer` và `source_documents` cho UI hiển thị.
 
 ### 4. Chạy chatbot
 
@@ -145,6 +203,12 @@ streamlit run app.py
 ```bash
 python -m group_project.evaluation.eval_pipeline
 ```
+| Thành viên           | MSSV        | Nhiệm vụ                                                                                                                                           | Trạng thái |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Hoàng Văn Anh        | 2A202600762 | Craw data, convert to mark down, chunk index, RAG chatbot, Workflow system, Write mark down                                                          | Done         |
+| Nguyễn Trường Giang | 2A202600792 | Chỉnh sửa evaluate.py để tích hợp các metric đánh giá + xây dựng golden_dataset.json làm bộ dữ liệu chuẩn phục vụ việc benchmark | Done         |
+| Nguyễn Lý Minh Kỳ   | 2A202600782 | semantic search, reranking, retrieval pipeline, generation có citation ở backend, sample streamlit UI                                              | Done         |
+| Phạm Ánh Dương     | 2A202600815 | Design and deploy, test chatbot                                                                                                                      |              |
 
 ---
 
@@ -201,6 +265,30 @@ python -m group_project.evaluation.eval_pipeline
 - [x] README có checklist trạng thái
 - [ ] Cập nhật phân công thật của thành viên nhóm
 - [ ] Push/commit lên repository chung
+# Test nhanh backend chatbot không cần UI
+python -m group_project.rag_chatbot_backend
+```
+
+UI team có thể tích hợp backend như sau:
+
+```python
+from group_project.rag_chatbot_backend import chat, reset_session
+
+result = chat(
+    "Tàng trữ trái phép chất ma túy bị xử lý như thế nào?",
+    session_id="demo-user",
+)
+
+print(result["answer"])
+print(result["source_documents"])
+```
+
+Output backend trả về các trường chính:
+
+- `answer`: câu trả lời có citation.
+- `source_documents`: danh sách source chunks đã dùng, gồm `citation`, `source_path`, `score`, `preview`.
+- `citations`: danh sách citation xuất hiện trong câu trả lời.
+- `history`: lịch sử hội thoại theo `session_id`, dùng cho follow-up questions.
 
 ---
 

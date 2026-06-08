@@ -44,11 +44,23 @@ RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 # Weaviate collection (bring-your-own-vector: vectorizer = none).
 COLLECTION_NAME = os.getenv("WEAVIATE_COLLECTION", "DrugLawDocs")
 
-# LLM sinh câu trả lời (Task 10). Mặc định trỏ Ollama qua OpenAI-compatible API
-# vì stack local + không GPU. Đổi sang OpenAI thật bằng cách set OPENAI_BASE_URL/KEY.
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
-LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
-LLM_API_KEY = os.getenv("OPENAI_API_KEY", "ollama")  # Ollama bỏ qua key
+def _has_real_openai_key(api_key: str) -> bool:
+    placeholders = {"", "ollama", "your-api-key", "your_api_key", "OPENAI_API_KEY", "api_key_cua_ban"}
+    return api_key.strip() not in placeholders
+
+
+# LLM sinh câu trả lời (Task 10). Nếu .env có OPENAI_API_KEY thật thì mặc định
+# gọi OpenAI API; nếu không có key thì fallback về Ollama local.
+LLM_API_KEY = os.getenv("OPENAI_API_KEY", "ollama")
+_USE_OPENAI_API = _has_real_openai_key(LLM_API_KEY)
+LLM_BASE_URL = os.getenv(
+    "OPENAI_BASE_URL",
+    "https://api.openai.com/v1" if _USE_OPENAI_API else "http://localhost:11434/v1",
+)
+LLM_MODEL = os.getenv(
+    "LLM_MODEL",
+    os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini" if _USE_OPENAI_API else "qwen2.5:7b-instruct"),
+)
 
 PAGEINDEX_API_KEY = os.getenv("PAGEINDEX_API_KEY", "")
 

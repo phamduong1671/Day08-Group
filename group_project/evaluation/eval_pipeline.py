@@ -7,12 +7,29 @@ RAG Evaluation Pipeline — DeepEval.
 Judge model: gpt-4o-mini (OpenAI) — set OPENAI_API_KEY trong .env ở root project.
 Pipeline được đánh giá: src.task10.generate_with_citation (Ollama qwen2.5:7b + Weaviate).
 
+Framework đã chọn: DeepEval. Lý do: 4 metric yêu cầu
+(faithfulness, relevance, context_recall, context_precision) ánh xạ
+1-1 sang các metric có sẵn của DeepEval, và evaluate() chạy được offline
+trong script Python (không bắt buộc cloud).
+
 4 metrics (DeepEval, threshold 0.7):
     - Faithfulness        : answer có bám đúng retrieval_context không (chống hallucinate)
     - Answer Relevancy    : answer có trả lời đúng câu hỏi không
     - Contextual Recall   : retriever có lấy đủ evidence so với expected_answer không
     - Contextual Precision : trong context lấy về, phần liên quan có được xếp lên đầu không
 
+
+Yêu cầu:
+    1. Load golden_dataset.json (>=15 Q&A pairs)
+    2. Chạy RAG pipeline trên từng question
+    3. Evaluate với 4 metrics: faithfulness, relevance, context_recall, context_precision
+    4. So sánh A/B ít nhất 2 configs
+    5. Export results ra results.md
+
+Cài đặt:
+    pip install deepeval
+    
+    
 Cách chạy (từ root project):
     .venv/bin/python -m group_project.evaluation.eval_pipeline
         # smoke test mặc định 2 câu đầu trong golden dataset
@@ -22,6 +39,21 @@ Cách chạy (từ root project):
 
     EVAL_LIMIT=0 .venv/bin/python -m group_project.evaluation.eval_pipeline
         # chạy toàn bộ golden dataset khi bộ mới đã chốt
+
+Cấu hình model làm "judge" (mặc định DeepEval dùng OpenAI):
+    export OPENAI_API_KEY=...                # dùng OpenAI
+  hoặc dùng model khác qua LiteLLM:
+    export DEEPEVAL_JUDGE_MODEL=anthropic/claude-3-5-sonnet-latest
+    export ANTHROPIC_API_KEY=...
+
+Giao diện RAG pipeline mà file này kỳ vọng (bạn cắm pipeline thật vào):
+    pipeline.generate_with_citation(question: str) -> {
+        "answer": str,
+        "sources": [{"content": str, ...}, ...],
+    }
+  và (tùy chọn, cho phần A/B) một trong hai:
+    - pipeline.configure(**params)          # áp dụng config
+    - các thuộc tính settable: pipeline.use_reranking, pipeline.alpha, ...
 """
 
 from __future__ import annotations
@@ -31,7 +63,10 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import statistics
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 # Generation đã chuyển sang OpenAI (gpt-4o-mini) nên pipeline không cần GPU.
 # Ép embedding (bge-m3) + reranker chạy CPU để tránh CUDA OOM trên VRAM 6GB.
@@ -426,6 +461,48 @@ def main():
 
     export_results(results, time.time() - t0)
 
+    def generate_with_citation(self, question: str) -> dict:
+        item = self._by_q.get(question, {})
+        expected = item.get("expected_answer", "")
+        ctx = item.get("expected_context", "")
+        return {"answer": expected, "sources": [{"content": f"{ctx}. {expected}"}]}
+
+
+# =============================================================================
+# Main
+# =============================================================================
 
 if __name__ == "__main__":
     main()
+    import sys
+
+    golden_dataset = load_golden_dataset()
+    print(f"Loaded {len(golden_dataset)} test cases")
+    assert len(golden_dataset) >= 15, "Golden dataset phải có >= 15 Q&A pairs"
+
+    if "--demo" in sys.argv:
+        # Smoke-test harness bằng pipeline giả lập (cần OPENAI_API_KEY hoặc judge model).
+        print("\n[DEMO] Chạy với _EchoPipeline — chỉ để test plumbing, không đo thật.\n")
+        comparison = compare_configs(
+            rag_pipeline=None,
+            golden_dataset=golden_dataset,
+            pipeline_factory=lambda params: _EchoPipeline(golden_dataset, **params),
+        )
+        export_results(comparison)
+    else:
+        # ---- Cắm RAG pipeline thật vào đây ----
+        # from src.task10_generation import RAGPipeline
+        # pipeline = RAGPipeline(...)
+        #
+        # # A/B: nếu pipeline dựng được theo config thì dùng factory cho sạch:
+        # comparison = compare_configs(
+        #     rag_pipeline=pipeline,
+        #     golden_dataset=golden_dataset,
+        #     configs=DEFAULT_CONFIGS,
+        #     # pipeline_factory=lambda params: RAGPipeline(**params),
+        # )
+        # export_results(comparison)
+        print(
+            "⚠ Hãy import RAG pipeline thật ở khối __main__ rồi chạy lại "
+            "(hoặc dùng `--demo` để smoke-test harness)."
+        )
