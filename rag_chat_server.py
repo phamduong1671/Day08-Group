@@ -78,6 +78,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             question = str(payload.get("question") or "").strip()
             top_k = int(payload.get("top_k") or 5)
             session_id = str(payload.get("session_id") or DEFAULT_SESSION_ID)
+            exact_phrase = bool(payload.get("exact_phrase"))
             if not question:
                 raise ValueError("Question is required.")
 
@@ -87,6 +88,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 question=question,
                 session_id=session_id,
                 top_k=max(3, min(top_k, 8)),
+                exact_phrase=exact_phrase,
             )
             response = {
                 "answer": str(result.get("answer") or "").strip()
@@ -95,6 +97,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "generation_backend": str(result.get("generation_backend") or "unknown"),
                 "citations": list(result.get("citations") or []),
                 "session_id": str(result.get("session_id") or session_id),
+                "search_mode": str(result.get("search_mode") or ("exact_phrase" if exact_phrase else "keyword")),
                 "sources": list(result.get("source_documents") or result.get("sources") or []),
             }
             self.write_json(200, response)

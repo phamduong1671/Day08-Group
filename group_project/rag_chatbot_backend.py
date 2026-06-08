@@ -11,6 +11,7 @@ không tạo giao diện, chỉ xử lý:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,13 +79,51 @@ def _compact_text(text: str, max_chars: int = 300) -> str:
     return compacted[:max_chars].rsplit(" ", 1)[0].rstrip() + "..."
 
 
-def build_contextual_query(question: str, memory: ConversationMemory) -> str:
+def _normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFC", str(text or "")).casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _exact_phrase_candidates(question: str) -> list[str]:
+    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', question)
+    phrases = [first or second for first, second in quoted if (first or second).strip()]
+    if not phrases:
+        phrases = [question]
+    return [_normalize_text(phrase) for phrase in phrases if _normalize_text(phrase)]
+
+
+def _filter_exact_sources(sources: list[dict[str, Any]], question: str) -> list[dict[str, Any]]:
+    phrases = _exact_phrase_candidates(question)
+    if not phrases:
+        return sources
+
+    filtered: list[dict[str, Any]] = []
+    for source in sources:
+        haystack = _normalize_text(
+            " ".join(
+                [
+                    source.get("content", ""),
+                    source.get("preview", ""),
+                    source.get("citation", ""),
+                    source.get("source", ""),
+                ]
+            )
+        )
+        if any(phrase in haystack for phrase in phrases):
+            filtered.append(source)
+    return filtered
+
+
+def build_contextual_query(question: str, memory: ConversationMemory, exact_phrase: bool = False) -> str:
     """
     Ghép câu hỏi mới với các lượt gần nhất để follow-up không bị mất ngữ cảnh.
 
     Ví dụ user hỏi "mức phạt là gì?", retrieval cần biết câu trước đang nói về
     tàng trữ, tổ chức sử dụng, hay cai nghiện.
     """
+    if exact_phrase:
+        return f'"{question}"'
+
     history = memory.retrieval_context()
     if not history:
         return question
@@ -141,7 +180,12 @@ def _normalize_sources(raw_sources: list[dict[str, Any]]) -> list[dict[str, Any]
     return normalized
 
 
-def answer_question(question: str, session_id: str = "default", top_k: int = 5) -> dict[str, Any]:
+def answer_question(
+    question: str,
+    session_id: str = "default",
+    top_k: int = 5,
+    exact_phrase: bool = False,
+) -> dict[str, Any]:
     """
     API chính cho UI.
 
@@ -157,7 +201,7 @@ def answer_question(question: str, session_id: str = "default", top_k: int = 5) 
         }
     """
     memory = get_memory(session_id)
-    contextual_query = build_contextual_query(question, memory)
+    contextual_query = build_contextual_query(question, memory, exact_phrase=exact_phrase)
 
     result = generate_with_citation(
         query=question,
@@ -166,6 +210,26 @@ def answer_question(question: str, session_id: str = "default", top_k: int = 5) 
         retrieval_query=contextual_query,
     )
     sources = _normalize_sources(result.get("sources", []))
+    if exact_phrase:
+        sources = _filter_exact_sources(sources, question)
+        if not sources:
+            answer = (
+                "Tôi không tìm thấy văn bản nào chứa chính xác cụm từ bạn nhập. "
+                "Bạn có thể bỏ chọn 'Tìm chính xác cụm từ' để tìm theo các từ trong câu hỏi."
+            )
+            memory.add_turn(question, answer, [])
+            return {
+                "answer": answer,
+                "sources": [],
+                "source_documents": [],
+                "citations": [],
+                "session_id": session_id,
+                "retrieval_query": contextual_query,
+                "retrieval_source": result.get("retrieval_source", "none"),
+                "generation_backend": result.get("generation_backend", "unknown"),
+                "history": memory.as_messages(),
+                "search_mode": "exact_phrase",
+            }
     citations = _extract_citations(result.get("answer", ""), sources)
 
     memory.add_turn(question, result.get("answer", ""), sources)
@@ -180,12 +244,23 @@ def answer_question(question: str, session_id: str = "default", top_k: int = 5) 
         "retrieval_source": result.get("retrieval_source", "none"),
         "generation_backend": result.get("generation_backend", "unknown"),
         "history": memory.as_messages(),
+        "search_mode": "exact_phrase" if exact_phrase else "keyword",
     }
 
 
-def chat(question: str, session_id: str = "default", top_k: int = 5) -> dict[str, Any]:
+def chat(
+    question: str,
+    session_id: str = "default",
+    top_k: int = 5,
+    exact_phrase: bool = False,
+) -> dict[str, Any]:
     """Alias ngắn cho UI Streamlit/Gradio/Chainlit."""
-    return answer_question(question=question, session_id=session_id, top_k=top_k)
+    return answer_question(
+        question=question,
+        session_id=session_id,
+        top_k=top_k,
+        exact_phrase=exact_phrase,
+    )
 
 
 if __name__ == "__main__":
