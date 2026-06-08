@@ -1,0 +1,16 @@
+# Truy to ca sy Chau Viet Cuong sau dem thac loan kinh hoang
+
+**Source:** https://vietnamnet.vn/truy-to-ca-sy-chau-viet-cuong-sau-dem-thac-loan-kinh-hoang-500843.html
+**Domain:** vietnamnet.vn
+**Crawled:** 2026-06-08T15:57:19+07:00
+**Type:** news
+
+---
+
+# Truy to ca sy Chau Viet Cuong sau dem thac loan kinh hoang
+
+Nguon: VietnamNet. Ghi chu: ban ghi offline nay la tom tat/paraphrase de phuc vu bai tap crawl khi moi truong khong co network; khi chay script co internet, noi dung se duoc thay bang ket qua crawl truc tiep.
+
+Bai viet dua tin ve vu an lien quan ca si Chau Viet Cuong, ten that Nguyen Viet Cuong. Noi dung neu viec co quan to tung truy to trong mot vu an nghiem trong xay ra sau mot dem co su dung chat ma tuy. Bai bao de cap toi cac tinh tiet trong cao trang, nhung nguoi co mat, ma tuy Ketamin va viec co quan chuc nang danh gia hanh vi phap ly cua cac bi can.
+
+Trong tap du lieu RAG, bai nay co gia tri vi no ket noi linh vuc giai tri voi hau qua phap ly nghiem trong cua viec su dung va tang tru trai phep chat ma tuy. Noi dung cung co nhieu keyword quan trong cho truy van: ca si, Chau Viet Cuong, Ketamin, truy to, tang tru trai phep chat ma tuy, su dung ma tuy, vu an hinh su. Khi sinh cau tra loi, he thong nen trich dan nguon va tranh mo rong ngoai thong tin da co trong bai.

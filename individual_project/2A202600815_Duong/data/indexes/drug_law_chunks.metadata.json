@@ -1,0 +1,8 @@
+{
+  "chunk_count": 305,
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dim": 256,
+  "vector_store": "local_jsonl",
+  "chunk_size": 500,
+  "chunk_overlap": 50
+}
