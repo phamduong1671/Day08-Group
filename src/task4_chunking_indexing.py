@@ -1,30 +1,21 @@
 """
-Task 4 — Chunking & Indexing vào Vector Store.
+Task 4 — Chunking & Indexing vào Vector Store (Weaviate).
 
-Hướng dẫn:
-    1. Đọc toàn bộ markdown files từ data/standardized/
-    2. Chọn 1 chunking strategy (giải thích lý do)
-    3. Chọn 1 embedding model (giải thích lý do)
-    4. Index vào vector store (Weaviate khuyến cáo)
-
-Chunking options (langchain-text-splitters):
-    - RecursiveCharacterTextSplitter: an toàn, phổ biến
-    - MarkdownHeaderTextSplitter: tốt cho file có heading
-    - SemanticChunker: dùng embedding để tách (nâng cao)
-
-Embedding model options:
-    - sentence-transformers/all-MiniLM-L6-v2 (384 dim, nhẹ)
-    - BAAI/bge-m3 (1024 dim, multilingual, tốt cho tiếng Việt)
-    - OpenAI text-embedding-3-small (1536 dim, API)
-
-Vector store options:
-    - Weaviate (khuyến cáo: hỗ trợ hybrid search built-in)
-    - ChromaDB (đơn giản, local)
-    - FAISS (chỉ dense search)
+Lựa chọn & lý do:
+    - Chunking: RecursiveCharacterTextSplitter. An toàn, tôn trọng ranh giới đoạn/câu
+      (\n\n → \n → ". "), phù hợp cả văn bản luật (Điều/Khoản) lẫn bài báo.
+    - chunk_size=900 ký tự: đủ ngắn để retrieval/reranking nhanh nhưng vẫn giữ
+      được một điều luật hoặc đoạn tin tương đối trọn vẹn.
+    - chunk_overlap=120: giữ liền mạch ngữ nghĩa qua ranh giới chunk.
+    - Embedding: BAAI/bge-m3 (1024-dim, multilingual) — mạnh cho tiếng Việt pháp lý.
+    - Vector store: Weaviate (vectorizer=none, ta tự đẩy vector), hỗ trợ scale + hybrid.
 
 Cài đặt:
     pip install langchain-text-splitters sentence-transformers weaviate-client
+    docker run -p 8080:8080 -p 50051:50051 cr.weaviate.io/semitechnologies/weaviate:latest
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -34,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_DIR = Path(__file__).parent.parent
-STANDARDIZED_DIR = Path(__file__).parent.parent / "data" / "standardized"
 LOCAL_INDEX_DIR = PROJECT_DIR / "data" / "indexes"
 LOCAL_INDEX_PATH = LOCAL_INDEX_DIR / "drug_law_chunks.jsonl"
 LOCAL_INDEX_METADATA_PATH = LOCAL_INDEX_DIR / "drug_law_chunks.metadata.json"
@@ -44,34 +34,18 @@ try:
 
     load_dotenv(PROJECT_DIR / ".env")
 except ImportError:
-    # requirements.txt already includes python-dotenv; this keeps imports safe
-    # in minimal test environments.
     pass
 
+from .config import COLLECTION_NAME, EMBEDDING_DIM, EMBEDDING_MODEL, STANDARDIZED_DIR
 
 # =============================================================================
-# CONFIGURATION — Giải thích lựa chọn của bạn trong comment
+# CONFIGURATION
 # =============================================================================
 
-# Dùng RecursiveCharacterTextSplitter vì corpus gồm cả văn bản pháp luật và bài
-# báo: heading không đồng đều, nên recursive splitting an toàn hơn Markdown-only.
-# 900 ký tự đủ ngắn để retrieval/reranking nhanh; overlap 120 giữ ngữ cảnh khi
-# một điều luật hoặc đoạn sự kiện bị cắt qua ranh giới chunk.
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 120
 CHUNKING_METHOD = "recursive"
-
-# BAAI/bge-m3 là model multilingual, hỗ trợ tiếng Việt tốt, phù hợp corpus pha
-# giữa pháp luật và báo chí. Dimension chuẩn của bge-m3 dense embedding là 1024.
-EMBEDDING_MODEL = "BAAI/bge-m3"
-EMBEDDING_DIM = 1024
-
-# Weaviate được chọn vì hỗ trợ vector search và hybrid search/BM25 built-in.
 VECTOR_STORE = "weaviate"
-WEAVIATE_COLLECTION = "DrugLawDocs"
-
-# Mặc định không tự tải model để script không bị kẹt khi mạng bị hạn chế. Nếu
-# muốn tải/chạy đúng BAAI/bge-m3, đặt ALLOW_MODEL_DOWNLOAD=1 trước khi chạy.
 ALLOW_MODEL_DOWNLOAD = os.getenv("ALLOW_MODEL_DOWNLOAD", "0") == "1"
 
 
@@ -163,10 +137,10 @@ def _build_text_splitter():
 
 def chunk_documents(documents: list[dict]) -> list[dict]:
     """
-    Chunk documents theo strategy đã chọn.
+    Chunk documents bằng RecursiveCharacterTextSplitter.
 
     Returns:
-        List of {'content': str, 'metadata': dict} — mỗi item là 1 chunk
+        List of {'content': str, 'metadata': dict} — mỗi item là 1 chunk.
     """
     splitter = _build_text_splitter()
     chunks: list[dict] = []
@@ -209,10 +183,6 @@ def chunk_documents(documents: list[dict]) -> list[dict]:
 def _hash_embedding(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
     """
     Deterministic local fallback when BAAI/bge-m3 is not cached/downloadable.
-
-    It keeps the same 1024-dimensional shape expected by downstream code, so
-    indexing can still complete in offline classrooms. For production/demo with
-    real semantic quality, run once with ALLOW_MODEL_DOWNLOAD=1.
     """
     vector = [0.0] * dim
     tokens = text.lower().split()
@@ -329,6 +299,14 @@ def _connect_weaviate():
     return weaviate.connect_to_local(host=host, port=port, grpc_port=grpc_port)
 
 
+def _write_index_metadata(metadata: dict[str, Any]) -> None:
+    LOCAL_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_INDEX_METADATA_PATH.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _index_to_weaviate(chunks: list[dict]) -> dict[str, Any]:
     from weaviate.classes.config import Configure, DataType, Property
 
@@ -337,11 +315,11 @@ def _index_to_weaviate(chunks: list[dict]) -> dict[str, Any]:
         if not client.is_ready():
             raise ConnectionError("Weaviate client is not ready")
 
-        if client.collections.exists(WEAVIATE_COLLECTION):
-            client.collections.delete(WEAVIATE_COLLECTION)
+        if client.collections.exists(COLLECTION_NAME):
+            client.collections.delete(COLLECTION_NAME)
 
         collection = client.collections.create(
-            name=WEAVIATE_COLLECTION,
+            name=COLLECTION_NAME,
             vector_config=Configure.Vectors.self_provided(),
             properties=[
                 Property(name="content", data_type=DataType.TEXT),
@@ -370,7 +348,7 @@ def _index_to_weaviate(chunks: list[dict]) -> dict[str, Any]:
 
         metadata = {
             "backend": "weaviate",
-            "collection": WEAVIATE_COLLECTION,
+            "collection": COLLECTION_NAME,
             "indexed_chunks": len(chunks),
             "embedding_model": chunks[0]["metadata"].get("embedding_model") if chunks else EMBEDDING_MODEL,
             "embedding_dim": EMBEDDING_DIM,
@@ -381,14 +359,6 @@ def _index_to_weaviate(chunks: list[dict]) -> dict[str, Any]:
         return metadata
     finally:
         client.close()
-
-
-def _write_index_metadata(metadata: dict[str, Any]) -> None:
-    LOCAL_INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    LOCAL_INDEX_METADATA_PATH.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 def _index_to_local_jsonl(chunks: list[dict], reason: str) -> dict[str, Any]:
@@ -406,7 +376,7 @@ def _index_to_local_jsonl(chunks: list[dict], reason: str) -> dict[str, Any]:
         "embedding_model": chunks[0]["metadata"].get("embedding_model") if chunks else EMBEDDING_MODEL,
         "embedding_dim": EMBEDDING_DIM,
         "vector_store_requested": VECTOR_STORE,
-        "weaviate_collection": WEAVIATE_COLLECTION,
+        "weaviate_collection": COLLECTION_NAME,
     }
     _write_index_metadata(metadata)
     return metadata
@@ -425,7 +395,7 @@ def index_to_vectorstore(chunks: list[dict]):
 
     try:
         result = _index_to_weaviate(chunks)
-        print(f"✓ Indexed {result['indexed_chunks']} chunks to Weaviate/{WEAVIATE_COLLECTION}")
+        print(f"✓ Indexed {result['indexed_chunks']} chunks to Weaviate/{COLLECTION_NAME}")
         return result
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
@@ -435,7 +405,7 @@ def index_to_vectorstore(chunks: list[dict]):
         return result
 
 
-def run_pipeline():
+def run_pipeline() -> None:
     """Chạy toàn bộ pipeline: load → chunk → embed → index."""
     target = "Weaviate Cloud" if _get_weaviate_cloud_url() else "Weaviate local"
 
@@ -448,6 +418,9 @@ def run_pipeline():
 
     docs = load_documents()
     print(f"\n✓ Loaded {len(docs)} documents")
+    if not docs:
+        print("⚠ Chưa có markdown trong data/standardized/ — hãy chạy Task 1-3 trước.")
+        return
 
     chunks = chunk_documents(docs)
     print(f"✓ Created {len(chunks)} chunks")

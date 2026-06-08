@@ -1,83 +1,81 @@
 """
 Task 6 — Lexical Search Module (BM25).
 
-Mặc định sử dụng BM25. Nếu dùng phương pháp khác (TF-IDF, Elasticsearch,
-Weaviate BM25 built-in), hãy giải thích cơ chế trong buổi demo → +5 bonus.
-
-Cài đặt:
-    pip install rank-bm25
-
 BM25 hoạt động thế nào:
-    - Term Frequency (TF): từ xuất hiện nhiều trong document → điểm cao
-    - Inverse Document Frequency (IDF): từ hiếm → quan trọng hơn
-    - Document length normalization: document dài không bị ưu tiên quá mức
-    - Formula: score(q,d) = Σ IDF(qi) * (tf(qi,d) * (k1+1)) / (tf(qi,d) + k1*(1-b+b*|d|/avgdl))
-    - k1=1.5 (term saturation), b=0.75 (length normalization)
+    - Term Frequency (TF): từ xuất hiện nhiều trong document → điểm cao.
+    - Inverse Document Frequency (IDF): từ hiếm → quan trọng hơn.
+    - Length normalization: document dài không bị ưu tiên quá mức.
+    - score(q,d) = Σ IDF(qi) * (tf(qi,d)*(k1+1)) / (tf(qi,d) + k1*(1-b+b*|d|/avgdl))
+    - k1=1.5 (term saturation), b=0.75 (length normalization).
+
+ĐIỂM MẤU CHỐT TIẾNG VIỆT: đây vẫn là BM25Okapi, nhưng không phải baseline BM25
+dùng `str.split()`. PyVi biến từ ghép như "tàng trữ" thành một lexical unit
+(`tàng_trữ`), giảm match rời sai nghĩa. Cùng một tokenizer được dùng cho corpus
+và query nên term frequency/IDF được tính trên đơn vị từ tiếng Việt nhất quán.
+
+Corpus = chính tập chunk của Task 4 (chunk_documents(load_documents())) → nội dung
+trùng khớp với những gì đã index vào Weaviate, để RRF ở Task 9 merge hợp lệ.
 """
 
-from pathlib import Path
+from __future__ import annotations
 
-# TODO: Load corpus từ data/standardized/ hoặc từ vector store
-CORPUS: list[dict] = []  # List of {'content': str, 'metadata': dict}
+from functools import lru_cache
+
+from .task4_chunking_indexing import chunk_documents, load_documents
 
 
-def build_bm25_index(corpus: list[dict]):
-    """
-    Xây dựng BM25 index từ corpus.
+def _tokenize(text: str) -> list[str]:
+    """Word-segment tiếng Việt rồi lowercase. Fallback split() nếu pyvi lỗi."""
+    try:
+        from pyvi import ViTokenizer
 
-    Args:
-        corpus: List of {'content': str, 'metadata': dict}
-    """
-    # TODO: Implement BM25 index
-    #
-    # from rank_bm25 import BM25Okapi
-    #
-    # # Tokenize - cho tiếng Việt nên dùng underthesea hoặc đơn giản split()
-    # tokenized_corpus = [doc["content"].lower().split() for doc in corpus]
-    # bm25 = BM25Okapi(tokenized_corpus)
-    # return bm25
-    raise NotImplementedError("Implement build_bm25_index")
+        return ViTokenizer.tokenize(text.lower()).split()
+    except Exception:
+        return text.lower().split()
+
+
+@lru_cache(maxsize=1)
+def _get_index():
+    """Build (corpus, bm25) một lần. Trả (None, None) nếu chưa có data."""
+    corpus = chunk_documents(load_documents())
+    if not corpus:
+        return None, None
+    from rank_bm25 import BM25Okapi
+
+    tokenized = [_tokenize(doc["content"]) for doc in corpus]
+    return corpus, BM25Okapi(tokenized)
 
 
 def lexical_search(query: str, top_k: int = 10) -> list[dict]:
     """
-    Tìm kiếm từ khóa sử dụng BM25.
-
-    Args:
-        query: Câu truy vấn
-        top_k: Số lượng kết quả tối đa
+    Tìm kiếm từ khoá bằng BM25.
 
     Returns:
-        List of {
-            'content': str,
-            'score': float,      # BM25 score
-            'metadata': dict
-        }
-        Sorted by score descending.
+        List of {'content': str, 'score': float, 'metadata': dict}, sorted desc.
     """
-    # TODO: Implement lexical search
-    #
-    # tokenized_query = query.lower().split()
-    # scores = bm25.get_scores(tokenized_query)
-    #
-    # # Get top_k indices
-    # import numpy as np
-    # top_indices = np.argsort(scores)[::-1][:top_k]
-    #
-    # results = []
-    # for idx in top_indices:
-    #     if scores[idx] > 0:
-    #         results.append({
-    #             "content": CORPUS[idx]["content"],
-    #             "score": float(scores[idx]),
-    #             "metadata": CORPUS[idx]["metadata"]
-    #         })
-    # return results
-    raise NotImplementedError("Implement lexical_search")
+    import numpy as np
+
+    corpus, bm25 = _get_index()
+    if not corpus:
+        return []
+
+    scores = bm25.get_scores(_tokenize(query))
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results: list[dict] = []
+    for idx in top_indices:
+        if scores[idx] <= 0:  # bỏ chunk không khớp keyword nào
+            continue
+        results.append(
+            {
+                "content": corpus[idx]["content"],
+                "score": float(scores[idx]),
+                "metadata": corpus[idx]["metadata"],
+            }
+        )
+    return results
 
 
 if __name__ == "__main__":
-    # Test
-    results = lexical_search("Điều 248 tàng trữ trái phép chất ma tuý", top_k=5)
-    for r in results:
+    for r in lexical_search("Điều 248 tàng trữ trái phép chất ma tuý", top_k=5):
         print(f"[{r['score']:.3f}] {r['content'][:100]}...")
