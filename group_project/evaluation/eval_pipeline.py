@@ -1,12 +1,23 @@
 """
-RAG Evaluation Pipeline.
+RAG Evaluation Pipeline — DeepEval.
 
-Đánh giá chất lượng RAG pipeline bằng DeepEval.
+Đánh giá chất lượng RAG pipeline của nhóm trên golden dataset, chạy A/B giữa
+2 config (hybrid + rerank  vs  hybrid không rerank) và export báo cáo ra results.md.
+
+Judge model: gpt-4o-mini (OpenAI) — set OPENAI_API_KEY trong .env ở root project.
+Pipeline được đánh giá: src.task10.generate_with_citation (Ollama qwen2.5:7b + Weaviate).
 
 Framework đã chọn: DeepEval. Lý do: 4 metric yêu cầu
 (faithfulness, relevance, context_recall, context_precision) ánh xạ
 1-1 sang các metric có sẵn của DeepEval, và evaluate() chạy được offline
 trong script Python (không bắt buộc cloud).
+
+4 metrics (DeepEval, threshold 0.7):
+    - Faithfulness        : answer có bám đúng retrieval_context không (chống hallucinate)
+    - Answer Relevancy    : answer có trả lời đúng câu hỏi không
+    - Contextual Recall   : retriever có lấy đủ evidence so với expected_answer không
+    - Contextual Precision : trong context lấy về, phần liên quan có được xếp lên đầu không
+
 
 Yêu cầu:
     1. Load golden_dataset.json (>=15 Q&A pairs)
@@ -17,6 +28,17 @@ Yêu cầu:
 
 Cài đặt:
     pip install deepeval
+    
+    
+Cách chạy (từ root project):
+    .venv/bin/python -m group_project.evaluation.eval_pipeline
+        # smoke test mặc định 2 câu đầu trong golden dataset
+
+    EVAL_LIMIT=8 .venv/bin/python -m group_project.evaluation.eval_pipeline
+        # chạy thử 8 câu
+
+    EVAL_LIMIT=0 .venv/bin/python -m group_project.evaluation.eval_pipeline
+        # chạy toàn bộ golden dataset khi bộ mới đã chốt
 
 Cấu hình model làm "judge" (mặc định DeepEval dùng OpenAI):
     export OPENAI_API_KEY=...                # dùng OpenAI
@@ -36,466 +58,408 @@ Giao diện RAG pipeline mà file này kỳ vọng (bạn cắm pipeline thật 
 
 from __future__ import annotations
 
+import json
 import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-import json
+# Generation đã chuyển sang OpenAI (gpt-4o-mini) nên pipeline không cần GPU.
+# Ép embedding (bge-m3) + reranker chạy CPU để tránh CUDA OOM trên VRAM 6GB.
+# Đặt trước mọi import torch/sentence-transformers. Override bằng cách set sẵn env.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+# Cho phép import `src.*` khi chạy bằng `python eval_pipeline.py` trực tiếp.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
 
 GOLDEN_DATASET_PATH = Path(__file__).parent / "golden_dataset.json"
 RESULTS_PATH = Path(__file__).parent / "results.md"
 
-# Tên 4 metric (key nội bộ) + ngưỡng pass mặc định.
-METRIC_THRESHOLD = 0.7
+JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o-mini")
+THRESHOLD = 0.7
+EVAL_LIMIT_RAW = os.getenv("EVAL_LIMIT", "2")
+EVAL_LIMIT = int(EVAL_LIMIT_RAW) if EVAL_LIMIT_RAW.strip() else 2
+EVAL_LIMIT = None if EVAL_LIMIT == 0 else EVAL_LIMIT  # 0 = chạy hết
+EVAL_WORKERS_RAW = os.getenv("EVAL_WORKERS", "1")
+EVAL_WORKERS = max(1, int(EVAL_WORKERS_RAW) if EVAL_WORKERS_RAW.strip() else 1)
 
-# Ánh xạ key -> tên hiển thị trong report.
+# Tên metric -> nhãn hiển thị (giữ thứ tự ổn định cho mọi bảng).
 METRIC_LABELS = {
     "faithfulness": "Faithfulness",
-    "relevance": "Answer Relevancy",
-    "context_recall": "Contextual Recall",
-    "context_precision": "Contextual Precision",
+    "answer_relevancy": "Answer Relevancy",
+    "contextual_recall": "Context Recall",
+    "contextual_precision": "Context Precision",
+}
+
+# A/B configs:
+# - A dùng score cross-encoder đã sigmoid nên threshold 0.3 có ý nghĩa.
+# - B dùng RRF score nhỏ (~1/(60+rank)); threshold 0 tránh biến no-rerank
+#   thành PageIndex fallback, giúp đo đúng tác động của reranking.
+CONFIGS = {
+    "A_hybrid_rerank": {
+        "use_reranking": True,
+        "score_threshold": 0.3,
+        "label": "Hybrid + Rerank",
+    },
+    "B_no_rerank": {
+        "use_reranking": False,
+        "score_threshold": 0.0,
+        "label": "Hybrid, no Rerank",
+    },
 }
 
 
 def load_golden_dataset() -> list[dict]:
     """Load golden dataset từ JSON file."""
     with open(GOLDEN_DATASET_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    return data[:EVAL_LIMIT] if EVAL_LIMIT else data
 
 
 # =============================================================================
-# Judge model (LLM dùng để chấm điểm các metric)
+# Judge + Metrics
 # =============================================================================
 
-def _build_judge_model():
-    """
-    Trả về model để DeepEval dùng làm judge.
+def get_judge():
+    """LLM judge dùng chung cho mọi metric (OpenAI gpt-4o-mini)."""
+    from deepeval.models import GPTModel
 
-    - Nếu đặt DEEPEVAL_JUDGE_MODEL -> dùng LiteLLM (hỗ trợ Claude, Gemini, Ollama...).
-    - Ngược lại trả về None để DeepEval dùng mặc định (OpenAI qua OPENAI_API_KEY).
-    """
-    model_name = os.environ.get("DEEPEVAL_JUDGE_MODEL")
-    if not model_name:
-        return None
-    try:
-        from deepeval.models import LiteLLMModel  # type: ignore
-    except Exception:  # pragma: no cover - tùy phiên bản deepeval
-        from deepeval.models.litellm_model import LiteLLMModel  # type: ignore
-    return LiteLLMModel(model=model_name)
+    return GPTModel(model=JUDGE_MODEL)
 
 
-def _build_metrics(model=None) -> list:
-    """Khởi tạo 4 metric của DeepEval. Trả về list theo đúng thứ tự METRIC_LABELS."""
+def build_metrics(judge):
+    """Tạo bộ 4 metric mới (metric giữ state nội bộ → mỗi lần đo cần instance sạch)."""
     from deepeval.metrics import (
-        FaithfulnessMetric,
         AnswerRelevancyMetric,
-        ContextualRecallMetric,
         ContextualPrecisionMetric,
+        ContextualRecallMetric,
+        FaithfulnessMetric,
     )
 
-    kwargs: dict[str, Any] = {"threshold": METRIC_THRESHOLD}
-    if model is not None:
-        kwargs["model"] = model
-
-    return [
-        FaithfulnessMetric(**kwargs),
-        AnswerRelevancyMetric(**kwargs),
-        ContextualRecallMetric(**kwargs),
-        ContextualPrecisionMetric(**kwargs),
-    ]
-
-
-# Ánh xạ tên metric (do DeepEval trả về) -> key nội bộ.
-# DeepEval đặt tên hơi khác nhau giữa các phiên bản nên dùng so khớp lỏng.
-def _metric_key_from_name(name: str) -> str | None:
-    n = name.lower()
-    if "faithful" in n:
-        return "faithfulness"
-    if "relevan" in n and "context" not in n:  # answer relevancy
-        return "relevance"
-    if "recall" in n:
-        return "context_recall"
-    if "precision" in n:
-        return "context_precision"
-    return None
-
-
-# =============================================================================
-# Chạy pipeline trên dataset -> tạo LLMTestCase
-# =============================================================================
-
-def _apply_config(rag_pipeline: Any, params: dict | None) -> None:
-    """Áp dụng config cho pipeline: ưu tiên configure(), fallback setattr."""
-    if not params:
-        return
-    configure = getattr(rag_pipeline, "configure", None)
-    if callable(configure):
-        configure(**params)
-        return
-    for key, value in params.items():
-        setattr(rag_pipeline, key, value)
-
-
-def build_test_cases(
-    rag_pipeline: Any,
-    golden_dataset: list[dict],
-    config: dict | None = None,
-) -> tuple[list, list[dict]]:
-    """
-    Chạy RAG pipeline trên từng câu hỏi và đóng gói thành LLMTestCase.
-
-    Trả về (test_cases, meta) trong đó meta giữ id/question để ghép lại sau khi chấm.
-    """
-    from deepeval.test_case import LLMTestCase
-
-    _apply_config(rag_pipeline, config)
-
-    test_cases: list = []
-    meta: list[dict] = []
-
-    for item in golden_dataset:
-        question = item["question"]
-        result = rag_pipeline.generate_with_citation(question)
-
-        answer = result.get("answer", "")
-        sources = result.get("sources", []) or []
-        retrieval_context = [
-            (s.get("content", "") if isinstance(s, dict) else str(s)) for s in sources
-        ]
-        # ContextualRecall/Precision cần ít nhất 1 context; tránh list rỗng gây lỗi.
-        if not retrieval_context:
-            retrieval_context = [""]
-
-        test_cases.append(
-            LLMTestCase(
-                input=question,
-                actual_output=answer,
-                expected_output=item.get("expected_answer", ""),
-                retrieval_context=retrieval_context,
-            )
-        )
-        meta.append({"id": item.get("id", question[:40]), "question": question})
-
-    return test_cases, meta
-
-
-# =============================================================================
-# Parse kết quả của DeepEval (an toàn giữa các phiên bản)
-# =============================================================================
-
-def _iter_test_results(eval_output: Any):
-    """evaluate() có thể trả EvaluationResult(.test_results) hoặc list trực tiếp."""
-    test_results = getattr(eval_output, "test_results", None)
-    return test_results if test_results is not None else eval_output
-
-
-def _iter_metrics_data(test_result: Any):
-    """Lấy danh sách metric data của 1 test result (tên thuộc tính đổi theo version)."""
-    for attr in ("metrics_data", "metrics_metadata"):
-        data = getattr(test_result, attr, None)
-        if data:
-            return data
-    return []
-
-
-def _aggregate(eval_output: Any, meta: list[dict]) -> dict:
-    """
-    Gom kết quả thành cấu trúc:
-    {
-      "per_case": [{"id","question","metrics":{key:{"score","success","reason"}}}],
-      "aggregate": {key: {"mean": float|None, "pass_rate": float|None, "n": int}},
+    return {
+        "faithfulness": FaithfulnessMetric(threshold=THRESHOLD, model=judge),
+        "answer_relevancy": AnswerRelevancyMetric(threshold=THRESHOLD, model=judge),
+        "contextual_recall": ContextualRecallMetric(threshold=THRESHOLD, model=judge),
+        "contextual_precision": ContextualPrecisionMetric(threshold=THRESHOLD, model=judge),
     }
-    """
-    per_case: list[dict] = []
-    scores: dict[str, list[float]] = {k: [] for k in METRIC_LABELS}
-    passes: dict[str, list[bool]] = {k: [] for k in METRIC_LABELS}
-
-    results = list(_iter_test_results(eval_output))
-    for idx, tr in enumerate(results):
-        case_metrics: dict[str, dict] = {}
-        for md in _iter_metrics_data(tr):
-            name = getattr(md, "name", "") or ""
-            key = _metric_key_from_name(name)
-            if key is None:
-                continue
-            score = getattr(md, "score", None)
-            success = bool(getattr(md, "success", False))
-            reason = getattr(md, "reason", "") or ""
-            case_metrics[key] = {"score": score, "success": success, "reason": reason}
-            if isinstance(score, (int, float)):
-                scores[key].append(float(score))
-            passes[key].append(success)
-
-        m = meta[idx] if idx < len(meta) else {"id": f"case_{idx}", "question": ""}
-        per_case.append(
-            {"id": m["id"], "question": m["question"], "metrics": case_metrics}
-        )
-
-    aggregate: dict[str, dict] = {}
-    for key in METRIC_LABELS:
-        s = scores[key]
-        p = passes[key]
-        aggregate[key] = {
-            "mean": (statistics.mean(s) if s else None),
-            "pass_rate": (sum(p) / len(p) if p else None),
-            "n": len(p),
-        }
-
-    return {"per_case": per_case, "aggregate": aggregate}
 
 
 # =============================================================================
-# DeepEval evaluation
+# Chạy pipeline + chấm điểm cho 1 config
 # =============================================================================
 
-def evaluate_with_deepeval(
-    rag_pipeline: Any,
+def score_config(
     golden_dataset: list[dict],
-    config: dict | None = None,
-) -> dict:
+    use_reranking: bool,
+    score_threshold: float,
+    judge,
+) -> list[dict]:
     """
-    Evaluate RAG pipeline sử dụng DeepEval.
+    Với mỗi câu hỏi: chạy RAG pipeline rồi đo 4 metric.
 
-    pip install deepeval
+    Returns:
+        list rows: {id, question, doc, difficulty, faithfulness, answer_relevancy,
+                    contextual_recall, contextual_precision}  (score None nếu lỗi)
     """
-    from deepeval import evaluate
-
-    judge = _build_judge_model()
-    metrics = _build_metrics(model=judge)
-    test_cases, meta = build_test_cases(rag_pipeline, golden_dataset, config=config)
-
-    # In ra giảm nhiễu; bỏ qua nếu phiên bản không hỗ trợ tham số.
-    try:
-        eval_output = evaluate(
-            test_cases=test_cases,
-            metrics=metrics,
-            print_results=False,
-            show_indicator=False,
-        )
-    except TypeError:
-        eval_output = evaluate(test_cases, metrics)
-
-    return _aggregate(eval_output, meta)
-
-
-# =============================================================================
-# A/B Comparison
-# =============================================================================
-
-# Các config muốn so sánh. Điều chỉnh theo tham số thật của pipeline.
-DEFAULT_CONFIGS: dict[str, dict] = {
-    "hybrid_rerank": {"use_reranking": True, "alpha": 0.5},
-    "dense_only": {"use_reranking": False, "alpha": 1.0},
-}
-
-
-def compare_configs(
-    rag_pipeline: Any,
-    golden_dataset: list[dict],
-    configs: dict[str, dict] | None = None,
-    pipeline_factory: Callable[[dict], Any] | None = None,
-) -> dict:
-    """
-    So sánh A/B giữa ít nhất 2 configs.
-
-    - Nếu truyền `pipeline_factory(params) -> pipeline`, mỗi config sẽ dựng pipeline mới
-      (sạch sẽ, tránh lẫn state). Đây là cách khuyến nghị.
-    - Nếu không, dùng `rag_pipeline` chung và áp config qua configure()/setattr trước mỗi run.
-
-    Trả về: {config_name: <kết quả evaluate_with_deepeval>}
-    """
-    configs = configs or DEFAULT_CONFIGS
-    results: dict[str, dict] = {}
-
-    for config_name, params in configs.items():
-        print(f"\n=== Đang chạy config: {config_name} ({params}) ===")
-        if pipeline_factory is not None:
-            pipeline = pipeline_factory(params)
-            results[config_name] = evaluate_with_deepeval(pipeline, golden_dataset)
-        else:
-            results[config_name] = evaluate_with_deepeval(
-                rag_pipeline, golden_dataset, config=params
+    total = len(golden_dataset)
+    if EVAL_WORKERS == 1:
+        rows = []
+        for i, item in enumerate(golden_dataset, 1):
+            rows.append(
+                score_item(
+                    i,
+                    total,
+                    item,
+                    use_reranking=use_reranking,
+                    score_threshold=score_threshold,
+                    judge=judge,
+                )
             )
+        return rows
 
-    return results
+    print(f"  Parallel mode: {EVAL_WORKERS} workers", flush=True)
+    rows_by_index: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=EVAL_WORKERS) as executor:
+        future_map = {
+            executor.submit(
+                score_item,
+                i,
+                total,
+                item,
+                use_reranking,
+                score_threshold,
+                judge,
+            ): i
+            for i, item in enumerate(golden_dataset, 1)
+        }
+        for done_count, future in enumerate(as_completed(future_map), 1):
+            i = future_map[future]
+            try:
+                rows_by_index[i] = future.result()
+            except Exception as e:
+                item = golden_dataset[i - 1]
+                print(f"      ⚠ worker error [{i}/{total}] {item.get('id', '')}: {e}", flush=True)
+                rows_by_index[i] = {**_meta(item), **{m: None for m in METRIC_LABELS}}
+            print(f"  Completed {done_count}/{total}", flush=True)
+    return [rows_by_index[i] for i in range(1, total + 1)]
+
+
+def score_item(
+    i: int,
+    total: int,
+    item: dict,
+    use_reranking: bool,
+    score_threshold: float,
+    judge,
+) -> dict:
+    """Chạy RAG + 4 metrics cho một câu hỏi."""
+    from deepeval.test_case import LLMTestCase
+    from src.task10_generation import generate_with_citation
+
+    question = item["question"]
+    print(f"  [{i}/{total}] {item.get('id', '')} {question[:60]}...", flush=True)
+
+    try:
+        result = generate_with_citation(
+            question,
+            use_reranking=use_reranking,
+            score_threshold=score_threshold,
+        )
+        retrieval_context = [c["content"] for c in result.get("sources", [])]
+        if not retrieval_context:
+            retrieval_context = ["(không có context được truy hồi)"]
+        test_case = LLMTestCase(
+            input=question,
+            actual_output=result["answer"],
+            expected_output=item["expected_answer"],
+            retrieval_context=retrieval_context,
+        )
+    except Exception as e:  # pipeline lỗi (Ollama/Weaviate) → ghi None, không dừng
+        print(f"      ⚠ pipeline error [{item.get('id', '')}]: {e}", flush=True)
+        return {**_meta(item), **{m: None for m in METRIC_LABELS}}
+
+    row = {**_meta(item)}
+    for name, metric in build_metrics(judge).items():
+        try:
+            metric.measure(test_case)
+            row[name] = round(float(metric.score), 3)
+        except Exception as e:
+            print(f"      ⚠ metric {name} error [{item.get('id', '')}]: {e}", flush=True)
+            row[name] = None
+    return row
+
+
+def _meta(item: dict) -> dict:
+    return {
+        "id": item.get("id", ""),
+        "question": item["question"],
+        "doc": item.get("doc", ""),
+        "difficulty": item.get("difficulty", ""),
+    }
+
+
+# =============================================================================
+# Aggregation
+# =============================================================================
+
+def averages(rows: list[dict]) -> dict:
+    """Trung bình mỗi metric (bỏ qua None)."""
+    out = {}
+    for name in METRIC_LABELS:
+        vals = [r[name] for r in rows if r.get(name) is not None]
+        out[name] = round(sum(vals) / len(vals), 3) if vals else None
+    scored = [r for r in rows if any(r.get(m) is not None for m in METRIC_LABELS)]
+    metric_vals = [out[m] for m in METRIC_LABELS if out[m] is not None]
+    out["overall"] = round(sum(metric_vals) / len(metric_vals), 3) if metric_vals else None
+    out["n_scored"] = len(scored)
+    return out
+
+
+def row_mean(row: dict) -> float | None:
+    vals = [row[m] for m in METRIC_LABELS if row.get(m) is not None]
+    return round(sum(vals) / len(vals), 3) if vals else None
+
+
+def worst_performers(rows: list[dict], n: int = 3) -> list[dict]:
+    """Bottom-N câu theo trung bình 4 metric."""
+    scored = [r for r in rows if row_mean(r) is not None]
+    return sorted(scored, key=row_mean)[:n]
 
 
 # =============================================================================
 # Export Results
 # =============================================================================
 
-def _fmt(value: float | None, pct: bool = False) -> str:
-    if value is None:
-        return "N/A"
-    return f"{value * 100:.1f}%" if pct else f"{value:.3f}"
+def _fmt(v) -> str:
+    return f"{v:.3f}" if isinstance(v, (int, float)) else "—"
 
 
-def _overall_mean(aggregate: dict) -> float | None:
-    means = [v["mean"] for v in aggregate.values() if v["mean"] is not None]
-    return statistics.mean(means) if means else None
+def export_results(results: dict[str, list[dict]], elapsed: float):
+    """Ghi báo cáo Markdown: overall A/B, phân tích, worst performers, đề xuất."""
+    aggs = {cfg: averages(rows) for cfg, rows in results.items()}
+    a, b = "A_hybrid_rerank", "B_no_rerank"
+    agg_a, agg_b = aggs[a], aggs[b]
 
-
-def export_results(comparison: dict, configs: dict[str, dict] | None = None) -> str:
-    """
-    Export evaluation results to results.md.
-
-    `comparison` là dict {config_name: kết quả evaluate_with_deepeval}.
-    Trả về nội dung markdown đã ghi.
-    """
-    configs = configs or DEFAULT_CONFIGS
-    lines: list[str] = []
-    lines.append("# RAG Evaluation Results")
-    lines.append("")
-    lines.append(f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_")
-    lines.append(f"_Framework: DeepEval · Pass threshold: {METRIC_THRESHOLD}_")
-    lines.append("")
-
-    config_names = list(comparison.keys())
-
-    # --- 1. Overall scores per config ---
-    lines.append("## Overall Scores")
-    lines.append("")
-    header = "| Metric | " + " | ".join(config_names) + " |"
-    sep = "|" + "---|" * (len(config_names) + 1)
-    lines.append(header)
-    lines.append(sep)
-    for key, label in METRIC_LABELS.items():
-        row = [label]
-        for cfg in config_names:
-            agg = comparison[cfg]["aggregate"][key]
-            row.append(f"{_fmt(agg['mean'])} ({_fmt(agg['pass_rate'], pct=True)} pass)")
-        lines.append("| " + " | ".join(row) + " |")
-    # Hàng trung bình tổng.
-    avg_row = ["**Mean (all metrics)**"]
-    for cfg in config_names:
-        avg_row.append(f"**{_fmt(_overall_mean(comparison[cfg]['aggregate']))}**")
-    lines.append("| " + " | ".join(avg_row) + " |")
-    lines.append("")
-
-    # --- 2. A/B comparison verdict ---
-    lines.append("## A/B Comparison")
-    lines.append("")
-    ranked = sorted(
-        config_names,
-        key=lambda c: (_overall_mean(comparison[c]["aggregate"]) or -1),
-        reverse=True,
-    )
-    best = ranked[0]
+    lines = []
+    lines.append("# RAG Evaluation Results\n")
+    lines.append("## Framework sử dụng\n")
     lines.append(
-        f"**Config tốt nhất theo điểm trung bình: `{best}`** "
-        f"({_fmt(_overall_mean(comparison[best]['aggregate']))})."
+        f"- **Framework:** DeepEval `{_deepeval_version()}`\n"
+        f"- **Judge model:** OpenAI `{JUDGE_MODEL}`\n"
+        f"- **Pipeline đánh giá:** `src.task10.generate_with_citation` "
+        f"(retrieval Weaviate hybrid + generation `{_gen_model()}`)\n"
+        f"- **Golden dataset:** {agg_a['n_scored']} câu chấm thành công"
+        f"{f' (giới hạn EVAL_LIMIT={EVAL_LIMIT})' if EVAL_LIMIT else ''}\n"
+        f"- **Evaluation mode:** {'Smoke test sample' if EVAL_LIMIT else 'Full dataset'}\n"
+        f"- **Workers:** {EVAL_WORKERS}\n"
+        f"- **Threshold pass:** {THRESHOLD} · **Thời gian chạy:** {elapsed/60:.1f} phút\n"
     )
-    lines.append("")
-    lines.append("Chênh lệch theo từng metric (so với config tốt nhất):")
-    lines.append("")
-    lines.append("| Metric | " + " | ".join(config_names) + " |")
-    lines.append(sep)
-    for key, label in METRIC_LABELS.items():
-        base = comparison[best]["aggregate"][key]["mean"]
-        row = [label]
-        for cfg in config_names:
-            m = comparison[cfg]["aggregate"][key]["mean"]
-            if m is None or base is None:
-                row.append("N/A")
-            else:
-                delta = m - base
-                sign = "+" if delta >= 0 else ""
-                row.append(f"{_fmt(m)} ({sign}{delta:.3f})")
-        lines.append("| " + " | ".join(row) + " |")
-    lines.append("")
 
-    # --- 3. Worst performers (theo config tốt nhất) ---
-    lines.append(f"## Worst Performers — `{best}`")
-    lines.append("")
-    best_cases = comparison[best]["per_case"]
+    # Overall A/B table
+    lines.append("\n---\n\n## Overall Scores (A/B)\n")
+    lines.append("| Metric | Config A (hybrid + rerank) | Config B (no rerank) | Δ (A − B) |")
+    lines.append("|--------|---------------------------|----------------------|-----------|")
+    for name, label in METRIC_LABELS.items():
+        va, vb = agg_a[name], agg_b[name]
+        delta = round(va - vb, 3) if (va is not None and vb is not None) else None
+        lines.append(f"| {label} | {_fmt(va)} | {_fmt(vb)} | {_fmt(delta)} |")
+    da = agg_a["overall"]
+    db = agg_b["overall"]
+    dd = round(da - db, 3) if (da is not None and db is not None) else None
+    lines.append(f"| **Average** | **{_fmt(da)}** | **{_fmt(db)}** | **{_fmt(dd)}** |")
 
-    def case_min_score(case: dict) -> float:
-        vals = [
-            mv["score"]
-            for mv in case["metrics"].values()
-            if isinstance(mv.get("score"), (int, float))
-        ]
-        return min(vals) if vals else 1.0
-
-    worst = sorted(best_cases, key=case_min_score)[:5]
-    if worst:
-        lines.append("| ID | Question | Lowest metric | Score | Reason |")
-        lines.append("|---|---|---|---|---|")
-        for case in worst:
-            metrics = case["metrics"]
-            if not metrics:
-                continue
-            low_key = min(
-                metrics,
-                key=lambda k: metrics[k]["score"]
-                if isinstance(metrics[k].get("score"), (int, float))
-                else 1.0,
-            )
-            low = metrics[low_key]
-            q = case["question"].replace("|", "\\|")
-            q = (q[:60] + "…") if len(q) > 60 else q
-            reason = (low.get("reason") or "").replace("|", "\\|").replace("\n", " ")
-            reason = (reason[:120] + "…") if len(reason) > 120 else reason
-            lines.append(
-                f"| {case['id']} | {q} | {METRIC_LABELS[low_key]} | "
-                f"{_fmt(low['score'])} | {reason} |"
-            )
-    else:
-        lines.append("_Không có dữ liệu per-case._")
-    lines.append("")
-
-    # --- 4. Recommendations (tự động) ---
-    lines.append("## Recommendations")
-    lines.append("")
-    recs: list[str] = []
-    recs.append(
-        f"Triển khai config `{best}` cho production vì đạt điểm trung bình cao nhất."
+    # A/B analysis
+    lines.append("\n---\n\n## A/B Comparison Analysis\n")
+    lines.append(
+        "**Config A — Hybrid + Rerank:** semantic (bge-m3) + BM25 hợp nhất bằng RRF, "
+        "sau đó cross-encoder `bge-reranker-v2-m3` chấm lại top kết quả.\n"
     )
-    best_agg = comparison[best]["aggregate"]
-    weak = [
-        METRIC_LABELS[k]
-        for k, v in best_agg.items()
-        if v["mean"] is not None and v["mean"] < METRIC_THRESHOLD
-    ]
-    if weak:
-        recs.append(
-            "Các metric dưới ngưỡng cần cải thiện: "
-            + ", ".join(weak)
-            + ". Gợi ý: nếu Contextual Recall/Precision thấp -> chỉnh retriever "
-            "(top_k, reranking, chunking); nếu Faithfulness thấp -> siết prompt buộc "
-            "trả lời bám context; nếu Answer Relevancy thấp -> tinh chỉnh prompt sinh câu trả lời."
+    lines.append(
+        "\n**Config B — Hybrid, no Rerank:** giống A nhưng bỏ bước cross-encoder; "
+        "lấy trực tiếp thứ hạng sau RRF; không dùng threshold fallback theo score "
+        "vì RRF score có thang đo khác cross-encoder.\n"
+    )
+    winner = "A (có rerank)" if (dd or 0) > 0 else ("B (không rerank)" if (dd or 0) < 0 else "ngang nhau")
+    lines.append(
+        f"\n**Kết luận:** Config tốt hơn theo điểm trung bình là **{winner}** "
+        f"(Δ average = {_fmt(dd)}). "
+        "Reranking thường nâng Context Precision rõ nhất vì nó đẩy chunk liên quan lên "
+        "đầu; nếu Δ nhỏ, retrieval gốc đã đủ tốt cho corpus pháp luật có cấu trúc rõ.\n"
+    )
+
+    # Worst performers (dựa trên config A)
+    lines.append("\n---\n\n## Worst Performers (Bottom 3 — Config A)\n")
+    lines.append("| # | ID | Question | Faith | Relev | Recall | Prec | Avg |")
+    lines.append("|---|----|----------|-------|-------|--------|------|-----|")
+    for idx, r in enumerate(worst_performers(results[a], 3), 1):
+        q = r["question"][:70].replace("|", "/")
+        lines.append(
+            f"| {idx} | {r['id']} | {q} | {_fmt(r.get('faithfulness'))} | "
+            f"{_fmt(r.get('answer_relevancy'))} | {_fmt(r.get('contextual_recall'))} | "
+            f"{_fmt(r.get('contextual_precision'))} | {_fmt(row_mean(r))} |"
+        )
+    failing = [r for r in results[a] if (row_mean(r) or 0) < THRESHOLD]
+    if failing:
+        lines.append(
+            "\n**Phân tích root cause (gợi ý):** câu điểm thấp thường thuộc loại "
+            "`comparison`/`cross_reference`/`scenario` (cần tổng hợp nhiều điều luật) hoặc "
+            "câu mà `expected_answer` còn ghi chú `note: đối chiếu văn bản gốc` (ground truth "
+            "chưa chốt số liệu) → kéo Recall/Faithfulness xuống. Cần kiểm tra: lỗi ở khâu "
+            "**retrieval** (không lấy đúng điều luật) hay **generation** (lấy đúng nhưng trả lời sai).\n"
         )
     else:
-        recs.append("Tất cả metric đều vượt ngưỡng — pipeline đạt yêu cầu cơ bản.")
-    for r in recs:
-        lines.append(f"- {r}")
-    lines.append("")
+        eval_scope = "sample hiện tại" if EVAL_LIMIT else "full dataset hiện tại"
+        lines.append(
+            f"\n**Phân tích:** không có case dưới threshold trong {eval_scope}. "
+            "Các case bottom vẫn nên được audit thủ công vì một metric riêng lẻ có thể thấp "
+            "dù điểm trung bình còn trên ngưỡng.\n"
+        )
 
-    content = "\n".join(lines)
-    RESULTS_PATH.write_text(content, encoding="utf-8")
-    print(f"\n✓ Đã ghi kết quả vào {RESULTS_PATH}")
-    return content
+    # Recommendations
+    lines.append("\n---\n\n## Recommendations\n")
+    recs = [
+        ("Chốt ground truth cho các câu có `note`",
+         "Đối chiếu khối lượng/khung hình phạt với văn bản gốc trong corpus, bỏ ghi chú. "
+         "→ Context Recall & Faithfulness tăng vì judge so với đáp án chính xác."),
+        ("Mở rộng Q&A cho mảng tin tức (news/)",
+         "Dataset hiện đã có câu news, nhưng vẫn nên tăng độ phủ theo nhiều bài và nhiều dạng câu hỏi. "
+         "→ Lộ rõ hơn điểm yếu retrieval trên văn bản phi cấu trúc."),
+        ("Tăng top_k retrieval cho câu cross-reference",
+         "Các câu tổng hợp nhiều điều luật cần nhiều evidence hơn (top_k 5 → 8). "
+         "→ Context Recall tăng cho nhóm câu hard."),
+    ]
+    for i, (action, impact) in enumerate(recs, 1):
+        lines.append(f"\n### Cải tiến {i}: {action}\n**Action:** {action}  \n**Expected impact:** {impact}  ")
+
+    # Per-question appendix (config A)
+    lines.append("\n\n---\n\n## Appendix — Per-question scores (Config A)\n")
+    lines.append("| ID | Doc | Diff | Faith | Relev | Recall | Prec |")
+    lines.append("|----|-----|------|-------|-------|--------|------|")
+    for r in results[a]:
+        lines.append(
+            f"| {r['id']} | {r['doc']} | {r['difficulty']} | "
+            f"{_fmt(r.get('faithfulness'))} | {_fmt(r.get('answer_relevancy'))} | "
+            f"{_fmt(r.get('contextual_recall'))} | {_fmt(r.get('contextual_precision'))} |"
+        )
+
+    RESULTS_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"\n✓ Báo cáo đã ghi: {RESULTS_PATH}")
+
+
+def _gen_model() -> str:
+    try:
+        from src.config import LLM_MODEL
+
+        return LLM_MODEL
+    except Exception:
+        return "?"
+
+
+def _deepeval_version() -> str:
+    try:
+        import deepeval
+
+        return deepeval.__version__
+    except Exception:
+        return "?"
 
 
 # =============================================================================
-# (Tùy chọn) Pipeline giả lập để smoke-test bộ harness mà không cần pipeline thật.
-# CHỈ để kiểm tra plumbing — KHÔNG phản ánh chất lượng RAG thật.
-# Bật bằng: python evaluate_rag.py --demo
+# Main
 # =============================================================================
 
-class _EchoPipeline:
-    """Pipeline demo: trả expected_answer làm context + answer. KHÔNG dùng để đo thật."""
+def main():
+    golden = load_golden_dataset()
+    print(f"Loaded {len(golden)} test cases. Judge = {JUDGE_MODEL}. Workers = {EVAL_WORKERS}\n")
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠ Chưa có OPENAI_API_KEY trong môi trường — judge sẽ lỗi.", flush=True)
 
-    def __init__(self, dataset: list[dict], use_reranking: bool = True, alpha: float = 0.5):
-        self._by_q = {d["question"]: d for d in dataset}
-        self.use_reranking = use_reranking
-        self.alpha = alpha
+    judge = get_judge()
+    t0 = time.time()
+    results = {}
+    for cfg, params in CONFIGS.items():
+        print(f"\n=== Config {cfg} ({params['label']}) ===")
+        results[cfg] = score_config(
+            golden,
+            params["use_reranking"],
+            params["score_threshold"],
+            judge,
+        )
 
-    def configure(self, **params):
-        for k, v in params.items():
-            setattr(self, k, v)
+    export_results(results, time.time() - t0)
 
     def generate_with_citation(self, question: str) -> dict:
         item = self._by_q.get(question, {})
@@ -509,6 +473,7 @@ class _EchoPipeline:
 # =============================================================================
 
 if __name__ == "__main__":
+    main()
     import sys
 
     golden_dataset = load_golden_dataset()

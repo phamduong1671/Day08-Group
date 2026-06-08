@@ -36,7 +36,10 @@ def _index_uses_hash_embedding() -> bool:
         return False
 
 
+@lru_cache(maxsize=1)
 def _load_query_model():
+    # @lru_cache: nạp bge-m3 (~2.2GB) MỘT lần rồi tái dùng. Không có cache thì mỗi
+    # semantic_search() lại load lại model từ đĩa → nghẽn nặng (nhất là eval nhiều câu).
     from sentence_transformers import SentenceTransformer
 
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")

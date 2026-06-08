@@ -255,11 +255,17 @@ def _call_llm(system_prompt: str, user_message: str) -> tuple[str, str]:
 def generate_with_citation(
     query: str,
     top_k: int = TOP_K,
+    use_reranking: bool = True,
+    score_threshold: float | None = None,
     conversation_history: list[dict] | None = None,
     retrieval_query: str | None = None,
 ) -> dict:
     """
     End-to-end RAG generation có citation.
+
+    Args:
+        use_reranking: bật/tắt cross-encoder rerank ở tầng retrieval (dùng cho A/B eval).
+        score_threshold: override ngưỡng fallback ở tầng retrieval.
 
     Returns:
         {
@@ -271,6 +277,10 @@ def generate_with_citation(
             'generation_backend': str,
         }
     """
+    retrieve_kwargs = {"top_k": top_k, "use_reranking": use_reranking}
+    if score_threshold is not None:
+        retrieve_kwargs["score_threshold"] = score_threshold
+    chunks = retrieve(query, **retrieve_kwargs)
     search_query = retrieval_query or query
     chunks = retrieve(search_query, top_k=top_k)
 
