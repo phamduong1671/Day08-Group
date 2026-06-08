@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAG Chatbot Pháp luật ma túy</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <h2>Thiết lập</h2>
+
+      <section class="panel-group">
+        <h3>Chế độ trả lời</h3>
+        <label class="radio-row">
+          <input type="radio" name="answerMode" value="exact" checked />
+          <span>Tìm chính xác cụm từ</span>
+        </label>
+      </section>
+
+      <section class="panel-group divided">
+        <h3>Tìm kiếm nâng cao</h3>
+        <label class="range-label" for="topK">Số lượng tài liệu truy hồi (top-k)</label>
+        <div class="range-row">
+          <input id="topK" type="range" min="3" max="8" value="5" />
+          <output id="topKValue">5</output>
+        </div>
+
+        <label class="range-label" for="threshold">Ngưỡng điểm tương đồng</label>
+        <div class="range-row">
+          <input id="threshold" type="range" min="0" max="1" step="0.01" value="0.60" />
+          <output id="thresholdValue">0.60</output>
+        </div>
+      </section>
+
+      <section class="panel-group divided history-row">
+        <button class="link-row" type="button">
+          <span class="icon">↺</span>
+          <span>Lịch sử hội thoại</span>
+          <span class="chevron">›</span>
+        </button>
+        <button id="clearChat" class="clear-button" type="button">⌫ Xóa lịch sử</button>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h1>RAG Chatbot Pháp luật ma túy</h1>
+        <p>Trợ lý AI tra cứu và giải đáp pháp luật về phòng, chống ma túy</p>
+      </header>
+
+      <section id="chat" class="chat" aria-live="polite"></section>
+
+      <section class="feedback" aria-label="Đánh giá câu trả lời">
+        <span>Hữu ích?</span>
+        <button type="button" aria-label="Thích">Like</button>
+        <button type="button" aria-label="Không thích">Dislike</button>
+      </section>
+
+      <section class="sources-section">
+        <div class="sources-title-row">
+          <h2>Source documents</h2>
+          <button class="round-next" type="button" aria-label="Xem thêm nguồn">›</button>
+        </div>
+        <div id="sources" class="sources-grid"></div>
+      </section>
+
+      <form id="chatForm" class="composer">
+        <input
+          id="question"
+          name="question"
+          autocomplete="off"
+          maxlength="2000"
+          placeholder="Nhập câu hỏi của bạn..."
+        />
+        <span id="charCount">0/2000</span>
+        <button id="sendButton" type="submit" aria-label="Gửi câu hỏi">Gửi</button>
+      </form>
+    </main>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <div class="avatar"></div>
+        <div class="message-body">
+          <div class="bubble">
+            <div class="content"></div>
+          </div>
+          <time class="time">10:15</time>
+        </div>
+      </article>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
