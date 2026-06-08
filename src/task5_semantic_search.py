@@ -1,13 +1,13 @@
 """
-Task 5 — Semantic Search Module.
+Task 5 — Semantic Search Module (dense retrieval).
 
-Viết module tìm kiếm ngữ nghĩa (dense retrieval) trên vector store.
+Embed query bằng cùng model ở Task 4 (bge-m3) rồi near_vector trên Weaviate.
+Score = 1 - cosine_distance (đổi distance → similarity, càng lớn càng liên quan).
 
-Yêu cầu:
-    - Input: query string + top_k
-    - Output: danh sách chunks có score, sorted descending
-    - Phải tương thích với embedding model và vector store ở Task 4
+Degrade-gracefully: nếu Weaviate chưa chạy hoặc collection trống → trả [].
 """
+
+from __future__ import annotations
 
 import json
 import math
@@ -15,11 +15,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.task4_chunking_indexing import (
+from .config import COLLECTION_NAME
+from .task4_chunking_indexing import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     LOCAL_INDEX_PATH,
-    WEAVIATE_COLLECTION,
     _connect_weaviate,
     _hash_embedding,
 )
@@ -58,13 +58,24 @@ def _tokenize(text: str) -> set[str]:
     return {token for token in normalized.split() if len(token) >= 2}
 
 
+def _load_local_index(index_path: Path = LOCAL_INDEX_PATH) -> list[dict]:
+    if not index_path.exists():
+        return []
+
+    chunks: list[dict] = []
+    with index_path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            chunks.append(json.loads(line))
+
+    return chunks
+
+
 def _pseudo_query_embedding(query: str, max_seed_chunks: int = 12) -> list[float]:
     """
     Fallback query vector trong cùng không gian với index đã tạo ở Task 4.
-
-    Khi BAAI/bge-m3 chưa load được tại runtime, ta lấy các chunk có overlap từ
-    khóa cao nhất và trung bình embedding đã index của chúng. Cách này không
-    thay thế model thật, nhưng vẫn dùng chính vector BGE-M3 đã lưu trong index.
     """
     query_tokens = _tokenize(query)
     if not query_tokens:
@@ -147,21 +158,6 @@ def _format_result(content: str, score: float, metadata: dict[str, Any] | None =
     }
 
 
-def _load_local_index(index_path: Path = LOCAL_INDEX_PATH) -> list[dict]:
-    if not index_path.exists():
-        return []
-
-    chunks: list[dict] = []
-    with index_path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(json.loads(line))
-
-    return chunks
-
-
 def _search_local_jsonl(query_embedding: list[float], top_k: int) -> list[dict]:
     results: list[dict] = []
 
@@ -185,10 +181,10 @@ def _search_weaviate(query_embedding: list[float], top_k: int) -> list[dict]:
 
     client = _connect_weaviate()
     try:
-        if not client.collections.exists(WEAVIATE_COLLECTION):
+        if not client.collections.exists(COLLECTION_NAME):
             return []
 
-        collection = client.collections.get(WEAVIATE_COLLECTION)
+        collection = client.collections.get(COLLECTION_NAME)
         response = collection.query.near_vector(
             near_vector=query_embedding,
             limit=top_k,
@@ -223,19 +219,10 @@ def _search_weaviate(query_embedding: list[float], top_k: int) -> list[dict]:
 
 def semantic_search(query: str, top_k: int = 10) -> list[dict]:
     """
-    Tìm kiếm ngữ nghĩa sử dụng vector similarity.
-
-    Args:
-        query: Câu truy vấn
-        top_k: Số lượng kết quả tối đa
+    Tìm kiếm ngữ nghĩa bằng vector similarity.
 
     Returns:
-        List of {
-            'content': str,      # Nội dung chunk
-            'score': float,      # Cosine similarity score
-            'metadata': dict     # source, doc_type, chunk_index
-        }
-        Sorted by score descending.
+        List of {'content': str, 'score': float, 'metadata': dict}, sorted desc.
     """
     if top_k <= 0 or not query.strip():
         return []
@@ -253,7 +240,5 @@ def semantic_search(query: str, top_k: int = 10) -> list[dict]:
 
 
 if __name__ == "__main__":
-    # Test
-    results = semantic_search("hình phạt cho tội tàng trữ ma tuý", top_k=5)
-    for r in results:
+    for r in semantic_search("hình phạt cho tội tàng trữ ma tuý", top_k=5):
         print(f"[{r['score']:.3f}] {r['content'][:100]}...")

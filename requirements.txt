@@ -17,9 +17,10 @@ weaviate-client>=4.5.0
 
 # Task 6 - BM25
 rank-bm25>=0.2.2
+pyvi>=0.1.1            # Vietnamese word segmentation (tokenize chuẩn cho BM25)
 
-# Task 7 - Reranking (choose one)
-# transformers>=4.40.0   # For local reranker models
+# Task 7 - Reranking (local cross-encoder bge-reranker-v2-m3)
+transformers>=4.40.0
 
 # Task 8 - PageIndex
 pageindex>=0.1.0
