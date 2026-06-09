@@ -10,6 +10,7 @@ const threshold = document.querySelector("#threshold");
 const thresholdValue = document.querySelector("#thresholdValue");
 const charCount = document.querySelector("#charCount");
 const clearChat = document.querySelector("#clearChat");
+const exactPhrase = document.querySelector("#exactPhrase");
 const STORAGE_KEY = "rag-chat-messages-v2";
 const SESSION_ID = "html-ui";
 
@@ -199,7 +200,7 @@ async function ask(question) {
         question,
         session_id: SESSION_ID,
         top_k: Number(topK.value),
-        exact_phrase: true,
+        exact_phrase: Boolean(exactPhrase?.checked),
       }),
     });
     const result = await response.json();
