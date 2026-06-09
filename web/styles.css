@@ -183,6 +183,21 @@ output {
   color: var(--accent-dark);
 }
 
+.eval-summary {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 250, 241, 0.64);
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  padding: 10px;
+  min-height: 42px;
+}
+
+.eval-summary strong {
+  color: var(--ink);
+}
+
 .main {
   min-width: 0;
   height: 100vh;
@@ -355,12 +370,17 @@ output {
 .round-next {
   width: 34px;
   height: 34px;
+  display: grid;
+  place-items: center;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
   background: rgba(255, 250, 241, 0.86);
   color: var(--accent);
   cursor: pointer;
   font-size: 1.8rem;
+  line-height: 1;
+  padding: 0;
+  font-family: Arial, sans-serif;
 }
 
 .sources-grid {
