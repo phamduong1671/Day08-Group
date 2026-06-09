@@ -69,6 +69,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.handle_reset()
             return
 
+        if path == "/api/evaluate":
+            self.handle_evaluate()
+            return
+
         if path != "/api/chat":
             self.send_error(404, "Not found")
             return
@@ -125,6 +129,23 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             reset_session(session_id)
             self.write_json(200, {"ok": True, "session_id": session_id})
+        except Exception as exc:
+            self.write_json(500, {"ok": False, "error": str(exc)})
+
+    def handle_evaluate(self) -> None:
+        try:
+            payload = read_json_body(self)
+            limit = int(payload.get("limit") or 5)
+            top_k = int(payload.get("top_k") or 5)
+            exact_phrase = bool(payload.get("exact_phrase"))
+            from group_project.evaluation.eval_pipeline import evaluate_chatbot
+
+            summary = evaluate_chatbot(
+                limit=None if limit == 0 else limit,
+                top_k=max(3, min(top_k, 8)),
+                exact_phrase=exact_phrase,
+            )
+            self.write_json(200, summary)
         except Exception as exc:
             self.write_json(500, {"ok": False, "error": str(exc)})
 

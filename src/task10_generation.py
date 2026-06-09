@@ -277,12 +277,11 @@ def generate_with_citation(
             'generation_backend': str,
         }
     """
+    search_query = retrieval_query or query
     retrieve_kwargs = {"top_k": top_k, "use_reranking": use_reranking}
     if score_threshold is not None:
         retrieve_kwargs["score_threshold"] = score_threshold
-    chunks = retrieve(query, **retrieve_kwargs)
-    search_query = retrieval_query or query
-    chunks = retrieve(search_query, top_k=top_k)
+    chunks = retrieve(search_query, **retrieve_kwargs)
 
     if not chunks:
         return {

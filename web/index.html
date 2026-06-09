@@ -33,12 +33,23 @@
         </div>
       </section>
 
+      <!-- <section class="panel-group divided eval-group">
+        <h3>Evaluation</h3>
+        <label class="range-label" for="evalLimit">Số câu golden dataset</label>
+        <div class="range-row">
+          <input id="evalLimit" type="range" min="1" max="20" value="5" />
+          <output id="evalLimitValue">5</output>
+        </div>
+        <button id="runEval" class="clear-button" type="button">Chạy evaluation</button>
+        <div id="evalSummary" class="eval-summary">Chưa chạy đánh giá.</div>
+      </section> -->
+
       <section class="panel-group divided history-row">
-        <button class="link-row" type="button">
+        <!-- <button class="link-row" type="button">
           <span class="icon">↺</span>
           <span>Lịch sử hội thoại</span>
           <span class="chevron">›</span>
-        </button>
+        </button> -->
         <button id="clearChat" class="clear-button" type="button">⌫ Xóa lịch sử</button>
       </section>
     </aside>
@@ -50,12 +61,6 @@
       </header>
 
       <section id="chat" class="chat" aria-live="polite"></section>
-
-      <section class="feedback" aria-label="Đánh giá câu trả lời">
-        <span>Hữu ích?</span>
-        <button type="button" aria-label="Thích">Like</button>
-        <button type="button" aria-label="Không thích">Dislike</button>
-      </section>
 
       <section class="sources-section">
         <div class="sources-title-row">

@@ -11,6 +11,10 @@ const thresholdValue = document.querySelector("#thresholdValue");
 const charCount = document.querySelector("#charCount");
 const clearChat = document.querySelector("#clearChat");
 const exactPhrase = document.querySelector("#exactPhrase");
+const evalLimit = document.querySelector("#evalLimit");
+const evalLimitValue = document.querySelector("#evalLimitValue");
+const runEval = document.querySelector("#runEval");
+const evalSummary = document.querySelector("#evalSummary");
 const STORAGE_KEY = "rag-chat-messages-v2";
 const SESSION_ID = "html-ui";
 
@@ -225,6 +229,42 @@ topK.addEventListener("input", () => {
 
 threshold.addEventListener("input", () => {
   thresholdValue.textContent = Number(threshold.value).toFixed(2);
+});
+
+evalLimit?.addEventListener("input", () => {
+  evalLimitValue.textContent = evalLimit.value;
+});
+
+runEval?.addEventListener("click", async () => {
+  runEval.disabled = true;
+  evalSummary.innerHTML = "Đang chạy evaluation...";
+  try {
+    const response = await fetch("/api/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        limit: Number(evalLimit.value),
+        top_k: Number(topK.value),
+        exact_phrase: Boolean(exactPhrase?.checked),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok === false) {
+      throw new Error(result.error || "Evaluation failed");
+    }
+    evalSummary.innerHTML = `
+      <strong>Overall: ${Number(result.averages.overall).toFixed(3)}</strong><br>
+      Faith: ${Number(result.averages.faithfulness).toFixed(3)} ·
+      Relev: ${Number(result.averages.answer_relevancy).toFixed(3)}<br>
+      Recall: ${Number(result.averages.contextual_recall).toFixed(3)} ·
+      Precision: ${Number(result.averages.contextual_precision).toFixed(3)}<br>
+      ${result.evaluated}/${result.dataset_size} câu · ${escapeHtml(result.judge)}
+    `;
+  } catch (error) {
+    evalSummary.textContent = `Evaluation lỗi: ${error.message}`;
+  } finally {
+    runEval.disabled = false;
+  }
 });
 
 clearChat.addEventListener("click", () => {
